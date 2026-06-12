@@ -1,4 +1,4 @@
-# Gomoku AlphaZero Training System
+# CaroNet
 
 A GPU-accelerated AlphaZero-style training system for Gomoku/Caro. The project combines **self-play reinforcement learning**, **Monte Carlo Tree Search (MCTS)**, **deep Policy-Value neural networks**, tactical search shortcuts, prioritized replay, checkpoint recovery, and multiple performance optimizations for long-running training.
 
