@@ -810,24 +810,3 @@ Possible next steps:
 8. Add a playable UI.
 9. Add model export scripts.
 10. Compare model sizes and simulation budgets.
-
----
-
-## 20. License
-
-Copyright (c) 2026 Rin. All rights reserved.
-
-This project is publicly available for viewing and reference purposes only.  
-Copying, modifying, redistributing, sublicensing, publishing, selling, or using this code in other projects is not permitted without explicit written permission from the author.
-
-See the `LICENSE` file for details.
-
----
-
-## 21. Conclusion
-
-CaroNet is a complete AlphaZero-style training system for Caro/Gomoku.  
-It combines deep Policy-Value networks, MCTS, self-play, tactical move detection, prioritized replay, board augmentation, checkpoint recovery, and GPU-focused optimization.
-
-The system is suitable for experiments on both model strength and training efficiency.  
-A strong checkpoint should be evaluated not only by loss values, but also by practical tactical behavior such as blocking, fork creation, double-threat handling, and forced-win conversion.
