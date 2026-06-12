@@ -1,0 +1,25 @@
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+
+# Models and checkpoints
+checkpoints/
+checkpoints_recovery/
+*.pth
+*.pt
+*.onnx
+
+# Data and logs
+*.log
+*.csv
+
+# Archives
+*.zip
+*.rar
+*.tar.gz
+
+# IDE and OS
+.vscode/
+.idea/
+.DS_Store

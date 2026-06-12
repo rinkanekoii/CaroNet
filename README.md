@@ -1,137 +1,146 @@
 # CaroNet
 
-A GPU-accelerated AlphaZero-style training system for Gomoku/Caro. The project combines **self-play reinforcement learning**, **Monte Carlo Tree Search (MCTS)**, **deep Policy-Value neural networks**, tactical search shortcuts, prioritized replay, checkpoint recovery, and multiple performance optimizations for long-running training.
+**CaroNet** is an AlphaZero-style training system for Caro/Gomoku.  
+It combines **self-play reinforcement learning**, **Monte Carlo Tree Search (MCTS)**, **deep Policy-Value neural networks**, tactical move detection, replay buffer training, checkpoint recovery, and GPU-oriented training optimizations.
 
-The codebase is designed to run in different environments, including local machines, Google Colab, Kaggle notebooks, and cloud GPU instances. Paths and runtime flags should be adjusted according to the target environment.
+The project is designed for research, experimentation, and long-running training of Caro/Gomoku AI models on local machines, Kaggle, Google Colab, or cloud GPU servers.
 
 ---
 
-## 1. What This Project Does
+## 1. Overview
 
-This project trains a Gomoku agent without human game records. The model improves by repeatedly playing against itself.
+CaroNet trains a Caro/Gomoku agent without relying on human game records.  
+The model improves by repeatedly playing against itself.
 
 At each move:
 
-1. The neural network evaluates the board.
-2. MCTS searches candidate continuations.
-3. The search visit distribution becomes the training target.
-4. The final game outcome becomes the value target.
+1. The neural network evaluates the current board.
+2. MCTS searches possible continuations.
+3. The MCTS visit distribution becomes the policy target.
+4. The final game result becomes the value target.
+5. The model is trained from generated self-play data.
 
-The training loop is:
+The general pipeline is:
 
 ```text
-Current checkpoint
-      |
-      v
-Self-play with MCTS
-      |
-      v
-Replay buffer
-      |
-      v
-Policy-Value training
-      |
-      v
-New checkpoint
-      |
-      v
+Current Model
+     |
+     v
+MCTS-guided Self-Play
+     |
+     v
+Replay Buffer
+     |
+     v
+Policy-Value Training
+     |
+     v
+Updated Checkpoint
+     |
+     v
 Repeat
 ```
 
 ---
 
-## 2. Core Algorithms
+## 2. Main Features
 
-### 2.1 AlphaZero-style Self-Play
+- AlphaZero-style self-play training.
+- Progressive Monte Carlo Tree Search.
+- Deep Policy-Value neural network.
+- Support for legacy model checkpoints.
+- Tactical move detection for immediate wins, blocks, forks, and double threats.
+- Prioritized replay buffer.
+- Board symmetry augmentation.
+- Checkpoint save/load and resume support.
+- Mixed precision training with AMP.
+- Optional ONNX Runtime inference (experimental; disabled by default in recommended commands).
+- Optional PyTorch compile support.
+- CLI-based configuration.
+- Training log export.
+- Support for local, Kaggle, Colab, and cloud GPU environments.
 
-The system follows the AlphaZero idea: instead of learning from expert games, the model creates its own dataset through self-play.
+---
 
-Each generated sample contains:
+## 3. Core Algorithms
+
+### 3.1 Self-Play Reinforcement Learning
+
+CaroNet uses self-play to generate its own training data.  
+Each game produces samples in the form:
 
 ```text
 (state, policy_target, value_target)
 ```
 
-Where:
-
 | Component | Meaning |
 |---|---|
 | `state` | Encoded board state from the current player's perspective |
-| `policy_target` | Improved move distribution produced by MCTS |
-| `value_target` | Final game result from the current player's perspective |
+| `policy_target` | MCTS-improved move distribution |
+| `value_target` | Final result of the game |
 
-The network learns both move selection and position evaluation.
+This allows the model to improve through repeated competition against itself.
 
 ---
 
-### 2.2 Policy-Value Network
+### 3.2 Policy-Value Network
 
-The neural network has two heads:
+The neural network has two output heads:
 
 | Head | Output | Purpose |
 |---|---|---|
-| Policy head | Move logits over all board cells | Predicts promising moves |
-| Value head | Scalar in `[-1, 1]` | Predicts win/loss expectation |
+| Policy head | Logits over board positions | Predicts promising moves |
+| Value head | Scalar in `[-1, 1]` | Predicts expected game outcome |
 
-For a 15x15 board, the policy head outputs:
+For a 15x15 board:
 
 ```text
-15 × 15 = 225 logits
+15 × 15 = 225 possible moves
 ```
 
-The value output represents the expected result:
-
-| Value | Interpretation |
-|---:|---|
-| `1.0` | Current player is winning |
-| `0.0` | Balanced or uncertain position |
-| `-1.0` | Current player is losing |
+The policy head outputs 225 logits.  
+The value head outputs a scalar evaluation of the current position.
 
 ---
 
-### 2.3 Board State Encoding
+### 3.3 Board Representation
 
-The board is encoded using multiple planes:
+A board state is encoded into multiple tensor planes:
 
 ```text
 [current_player_stones, opponent_stones, empty_cells, row_coordinates, column_coordinates]
 ```
 
-The optional coordinate planes help the network distinguish center, edge, and corner positions. This matters in Gomoku because opening strength is not position-invariant in practical play.
+The coordinate planes help the model understand absolute board location.  
+This is useful because center control is important in Caro/Gomoku openings.
 
 ---
 
-### 2.4 Monte Carlo Tree Search
+### 3.4 Monte Carlo Tree Search
 
-MCTS improves the raw policy from the neural network by running simulations before selecting a move.
+MCTS improves raw neural network policy by performing simulations before selecting a move.
 
-Each MCTS simulation performs:
+Each simulation includes:
 
-1. **Selection**: choose a child node using PUCT.
-2. **Expansion**: add candidate child moves.
-3. **Evaluation**: use the Policy-Value network to evaluate a leaf position.
-4. **Backup**: propagate the value estimate through the path.
-5. **Move selection**: use visit counts to form the final policy target.
+1. **Selection**: traverse the tree using a PUCT-style score.
+2. **Expansion**: add promising child nodes.
+3. **Evaluation**: evaluate a leaf state using the Policy-Value network.
+4. **Backup**: propagate the value estimate back through the tree.
+5. **Move selection**: choose a move from visit counts.
 
-The key MCTS parameter is:
+The main parameter is:
 
 ```bash
 --sims
 ```
 
-Example:
-
-```bash
---sims 800
-```
-
-Higher simulation counts produce stronger targets but increase self-play time significantly.
+Higher simulation counts produce stronger self-play targets but require more compute.
 
 ---
 
-### 2.5 PUCT Selection
+### 3.5 PUCT Selection
 
-The MCTS implementation uses a PUCT-style selection score:
+CaroNet uses a PUCT-style formula:
 
 ```text
 score(s, a) = Q(s, a) + U(s, a)
@@ -142,10 +151,10 @@ Where:
 | Term | Meaning |
 |---|---|
 | `Q(s, a)` | Estimated value of action `a` |
-| `U(s, a)` | Exploration bonus based on prior probability |
-| `c_puct` | Controls exploration strength |
+| `U(s, a)` | Exploration bonus based on policy prior |
+| `c_puct` | Exploration strength |
 
-The parameter is controlled by:
+Controlled by:
 
 ```bash
 --c_puct
@@ -153,11 +162,12 @@ The parameter is controlled by:
 
 ---
 
-### 2.6 Progressive Widening
+### 3.6 Progressive Widening
 
-The MCTS implementation supports progressive widening. Instead of expanding every legal move at once, it gradually expands more moves as the node receives more visits.
+Progressive widening avoids expanding all legal moves at once.  
+Instead, the number of expanded children grows with node visits.
 
-This reduces wasted computation in early-game positions where the branching factor is large.
+This reduces search cost in early-game positions where the board has many legal moves.
 
 Controlled by:
 
@@ -168,62 +178,61 @@ Controlled by:
 
 ---
 
-### 2.7 Tactical Move Bypass
+### 3.7 Tactical Move Detection
 
-Before running full MCTS, the self-play logic checks tactical conditions such as:
+Before running full MCTS, CaroNet checks for tactical situations such as:
 
-- immediate winning move;
-- immediate blocking move;
-- fork or double-threat creation.
+- immediate winning moves;
+- immediate blocking moves;
+- fork creation;
+- double-threat opportunities.
 
-If a forced tactical move exists, the system can bypass full MCTS and directly assign the policy target to that move.
-
-This improves tactical reliability and avoids wasting simulations on obvious forced positions.
-
----
-
-### 2.8 Fork and Double-Threat Detection
-
-The code includes logic for detecting moves that create multiple winning threats. Instead of scanning the whole board for every candidate, the optimized fork search checks only a local window around the candidate move.
-
-This is important for Gomoku because double threats are often decisive.
+This improves tactical reliability and prevents wasting simulations on obvious forced moves.
 
 ---
 
-### 2.9 Zobrist Hashing
+### 3.8 Fork and Double-Threat Search
 
-MCTS uses Zobrist hashing to represent board states efficiently. Hashing allows fast state identification and supports search reuse across moves.
+Fork detection checks whether a move creates multiple winning threats.  
+The implementation uses localized scanning around candidate moves instead of scanning the whole board, reducing computation during self-play.
 
-This helps reduce repeated computation during tree search.
+This is important because double threats are often decisive in Caro/Gomoku.
 
 ---
 
-### 2.10 Opening Exploration
+### 3.9 Opening Exploration
 
-Early self-play moves can receive exploration noise:
+Early-game exploration is controlled by:
+
+```bash
+--first_noise_moves
+```
+
+Example:
 
 ```bash
 --first_noise_moves 18
 ```
 
-This prevents the model from always generating the same openings and improves dataset diversity.
+This prevents self-play from repeatedly generating the same openings.
 
 ---
 
-### 2.11 Center Bias
+### 3.10 Center Bias
 
-The training pipeline supports optional opening center bias:
+Caro/Gomoku openings are usually stronger near the center.  
+CaroNet supports optional center bias during early moves:
 
 ```bash
 --center_bias_strength 0.7
 --center_bias_moves 10
 ```
 
-This encourages early self-play moves near the board center. It is useful because center control is usually stronger in Gomoku openings.
+This encourages stronger opening positions during self-play.
 
 ---
 
-### 2.12 Alternating Start Player
+### 3.11 Alternating Start Player
 
 The flag:
 
@@ -231,428 +240,348 @@ The flag:
 --alternate_start_player
 ```
 
-alternates the first player across self-play games. This reduces first-player bias in the generated dataset.
+alternates the first player across self-play games.  
+This reduces first-player bias in the dataset.
 
 ---
 
-## 3. Engineering and Performance Optimizations
+## 4. Engineering Optimizations
 
-The project includes several algorithmic and systems-level optimizations.
+CaroNet includes multiple optimizations to improve training speed and stability.
 
-### 3.1 Numba-Accelerated Board Logic
+### 4.1 Numba-Accelerated Board Logic
 
-Critical board operations are accelerated with Numba JIT compilation, including:
+Critical board operations are accelerated using Numba JIT compilation:
 
 - win checking;
 - neighbor detection;
-- tactical winning/blocking masks;
+- tactical mask generation;
 - fork detection;
 - PUCT child selection.
 
-This reduces Python overhead inside MCTS.
+This reduces Python overhead during MCTS.
 
 ---
 
-### 3.2 Localized Tactical Scanning
+### 4.2 Zobrist Hashing
 
-Fork detection only scans within the win-length radius of a candidate move instead of scanning the whole board. This reduces unnecessary board checks during tactical analysis.
-
----
-
-### 3.3 Progressive MCTS Expansion
-
-Progressive widening limits how many child nodes are expanded early, reducing search cost in high-branching positions.
+MCTS uses Zobrist hashing for efficient board state identification.  
+This helps track and reuse search states.
 
 ---
 
-### 3.4 Batched Neural Network Evaluation
+### 4.3 Batched Neural Network Evaluation
 
-MCTS supports batched neural network evaluation through the `--batch` parameter:
+MCTS supports batched inference through:
+
+```bash
+--batch
+```
+
+Example:
 
 ```bash
 --batch 256
 ```
 
-Batching improves GPU utilization when many leaf nodes need network inference.
+Batching improves GPU utilization when evaluating multiple leaf nodes.
 
 ---
 
-### 3.5 Root Reuse
+### 4.4 Root Reuse
 
-After a move is selected, the MCTS tree can reuse the corresponding child node as the new root. This avoids discarding all search information after every move.
-
----
-
-### 3.6 Prioritized Replay Buffer
-
-The replay buffer uses a Fenwick tree for efficient weighted priority sampling. This allows sampling important positions more efficiently than uniform-only replay.
+After a move is selected, the corresponding child node can be reused as the new root.  
+This avoids discarding useful search information after each move.
 
 ---
 
-### 3.7 Preallocated Replay Storage
+### 4.5 Prioritized Replay Buffer
 
-The replay buffer uses preallocated NumPy arrays for states, policies, values, and priorities. This avoids repeated memory allocation during long training runs.
+The replay buffer supports weighted priority sampling.  
+A Fenwick tree is used for efficient priority updates and sampling.
+
+Benefits:
+
+- faster weighted sampling;
+- better use of important positions;
+- scalable replay storage.
 
 ---
 
-### 3.8 Board Symmetry Augmentation
+### 4.6 Preallocated Replay Storage
 
-The augmentation module supports rotations and flips of board states and policy targets. This increases data diversity without requiring extra self-play games.
-
-When coordinate planes are used, they are regenerated after augmentation to preserve correct absolute coordinates.
+Replay data is stored in preallocated NumPy arrays.  
+This avoids repeated memory allocation during long training runs.
 
 ---
 
-### 3.9 Mixed Precision Training
+### 4.7 Board Symmetry Augmentation
 
-The training loop supports automatic mixed precision:
+CaroNet supports board symmetry augmentation using rotations and flips.
+
+This increases data diversity without requiring more self-play games.
+
+When coordinate planes are used, they are regenerated after augmentation so that absolute board coordinates remain correct.
+
+---
+
+### 4.8 Mixed Precision Training
+
+Automatic mixed precision can be enabled with:
 
 ```bash
 --use_amp
 ```
 
-AMP can reduce VRAM usage and speed up training on CUDA GPUs.
+AMP reduces VRAM usage and can speed up training on CUDA GPUs.
 
 ---
 
-### 3.10 Channels-Last Memory Format
+### 4.9 Gradient Accumulation
 
-When CUDA is used, the model can be moved to channels-last memory format, which may improve convolution performance on supported GPUs.
-
----
-
-### 3.11 TF32 Acceleration
-
-On compatible NVIDIA GPUs, TF32 matrix multiplication can be enabled for faster training and inference.
-
----
-
-### 3.12 Gradient Accumulation
-
-The training code supports gradient accumulation:
+Gradient accumulation is controlled by:
 
 ```bash
---accumulation_steps 8
+--accumulation_steps
 ```
 
-In this codebase, accumulation splits the training batch into smaller micro-batches to reduce VRAM usage while preserving the intended effective batch behavior.
+In this codebase, accumulation splits the training batch into smaller micro-batches to reduce VRAM usage while preserving the intended training batch behavior.
 
 ---
 
-### 3.13 Gradient Clipping
+### 4.10 Gradient Clipping
 
-Gradient clipping improves stability:
+Gradient clipping helps prevent unstable updates:
 
 ```bash
 --grad_clip 1.0
 ```
 
-This prevents very large gradient updates from destabilizing training.
+---
+
+### 4.11 Learning Rate Warmup and Cosine Annealing
+
+The training loop supports:
+
+- warmup phase;
+- cosine annealing;
+- non-zero minimum learning rate ratio.
+
+This improves stability during long-running training.
 
 ---
 
-### 3.14 Learning Rate Warmup and Cosine Annealing
+### 4.12 Optional PyTorch Compile
 
-The optimizer uses a learning rate schedule with:
-
-1. warmup phase;
-2. cosine annealing phase;
-3. non-zero minimum learning rate ratio.
-
-This helps avoid unstable early updates while still reducing learning rate over time.
-
----
-
-### 3.15 Fused AdamW Fallback
-
-The training loop tries to use fused AdamW when safe and available. If it is not supported, it falls back to standard AdamW.
-
----
-
-### 3.16 Optional `torch.compile`
-
-The code supports optional PyTorch compilation:
+PyTorch compilation can be enabled when supported:
 
 ```bash
 --use_compile
+```
+
+It can also be disabled for compatibility:
+
+```bash
 --no_use_compile
 ```
 
-This can improve performance in some Linux/CUDA environments, but it may be disabled for compatibility.
-
 ---
 
-### 3.17 Optional ONNX Runtime Inference
+### 4.13 Optional ONNX Runtime
 
-The project includes an ONNX wrapper for inference acceleration. It can use available providers such as CUDA or TensorRT when supported.
-
-Controlled by:
+CaroNet includes optional ONNX Runtime inference support, but this path should be treated as experimental.
 
 ```bash
 --use_onnx
 --no_use_onnx
 ```
 
----
-
-### 3.18 Parallel Self-Play
-
-The training loop supports parallel self-play workers:
+The recommended default is:
 
 ```bash
---selfplay_workers 2
+--no_use_onnx
 ```
 
-On CPU, multiprocessing can be used. On CUDA, thread-based parallelism can be used to share the GPU model.
+PyTorch inference is the primary and most compatible backend. ONNX/TensorRT can be useful for speed experiments, but it may fail depending on CUDA, ONNX Runtime, TensorRT, driver versions, model export compatibility, and runtime providers.
 
-The optimal number of workers depends on:
+Use ONNX only when the environment is known to support it reliably.
+
+---
+
+### 4.14 Parallel Self-Play
+
+Parallel self-play workers are controlled by:
+
+```bash
+--selfplay_workers
+```
+
+The best value depends on:
 
 - CPU speed;
-- GPU type;
+- GPU model;
 - board size;
-- MCTS simulations;
-- batch size;
-- memory bandwidth.
+- number of MCTS simulations;
+- memory bandwidth;
+- environment limitations.
 
 ---
 
-### 3.19 Atomic Checkpoint Saving
+### 4.15 Atomic Checkpoint Saving
 
-Checkpoint saving uses a temporary file followed by atomic replacement. This reduces the chance of corrupting a checkpoint if the process is interrupted while saving.
+Checkpoints are saved through a temporary file and then atomically replaced.  
+This reduces the chance of corrupting checkpoint files if training is interrupted.
 
 ---
 
-## 4. Technologies Used
+## 5. Technologies Used
 
 | Technology | Purpose |
 |---|---|
-| Python | Main language |
+| Python | Main programming language |
 | PyTorch | Neural network training and inference |
 | CUDA | GPU acceleration |
 | AMP | Mixed precision training |
-| NumPy | Board and replay data handling |
+| NumPy | Board data and replay buffer storage |
 | Numba | JIT acceleration for board logic |
 | SciPy | Board utility operations |
-| ONNX Runtime | Optional inference backend |
-| TensorRT | Optional accelerated ONNX provider |
-| CSV logging | Training metric tracking |
+| ONNX Runtime | Optional experimental inference backend |
+| TensorRT | Optional experimental ONNX acceleration backend |
+| CSV logging | Training metrics |
 
 ---
 
-## 5. Project Structure
+## 6. Project Structure
 
 ```text
-Gomoku-Training/
+CaroNet/
 ├── training.py              # CLI entry point
-├── training_loop.py         # Main training loop, checkpointing, scheduling
+├── training_loop.py         # Main training loop
 ├── self_play.py             # Self-play game generation
-├── mcts.py                  # Progressive MCTS and tactical search
+├── mcts.py                  # MCTS and tactical search
 ├── models.py                # Main model architectures
-├── legacy_models.py         # Legacy-compatible model architectures
-├── loss.py                  # Policy-value loss and optimizer steps
+├── legacy_models.py         # Legacy model architectures
+├── loss.py                  # Policy-value loss and optimizer logic
 ├── replay_buffer.py         # Prioritized replay buffer
 ├── augmentation.py          # Board symmetry augmentation
 ├── checkpoint_utils.py      # Checkpoint save/load helpers
 ├── evaluate.py              # Arena evaluation
-├── config.py                # CLI arguments and default configs
-├── utils.py                 # Board encoding and win checking
-└── checkpoints/             # Saved checkpoints
+├── config.py                # CLI argument definitions
+├── utils.py                 # Board utilities and state encoding
+├── requirements.txt         # Core dependencies
+├── requirements-optional.txt# Optional dependencies
+├── LICENSE                  # License information
+└── README.md                # Project documentation
 ```
 
 ---
 
-## 6. Installation
+## 7. Installation
 
-### 6.1 Basic Requirements
-
-Install the main dependencies:
+### 7.1 Core Dependencies
 
 ```bash
-pip install torch numpy scipy numba
+pip install -r requirements.txt
 ```
 
-For ONNX inference:
+Example `requirements.txt`:
 
-```bash
-pip install onnx onnxruntime
+```txt
+numpy>=1.24
+scipy>=1.10
+numba>=0.58
+torch>=2.0
 ```
-
-For GPU ONNX Runtime, install the correct package for the target environment.
 
 ---
 
-## 7. Running the Project
+### 7.2 Optional Dependencies
 
-The repository is environment-agnostic. Use the same `training.py` entry point on local machines, Kaggle, Colab, or cloud GPU servers.
+These dependencies are only needed for experimental ONNX inference. They are not required for standard PyTorch training.
+
+For experimental ONNX support:
+
+```bash
+pip install -r requirements-optional.txt
+```
+
+Example `requirements-optional.txt`:
+
+```txt
+onnx
+onnxruntime
+```
+
+ONNX is not required for normal training. The recommended training commands use `--no_use_onnx`.
+
+For GPU ONNX Runtime, install the correct package for the target CUDA environment. Version compatibility can be fragile, so PyTorch should be considered the default backend.
 
 ---
 
-### 7.1 Generic Training Command
+---
 
-Use this form for any environment:
+## 8. ONNX Compatibility Note
+
+ONNX support is included for experimentation, but it is not the default training path.
+
+Recommended default:
 
 ```bash
-python training.py \
-    --mode train \
-    --init_model "<PATH_TO_CHECKPOINT>/model_latest.pth" \
-    --model_class v8_legacy \
-    --size 15 \
-    --channels 320 \
-    --res_blocks 20 \
-    --iters 200 \
-    --games_per_iter 64 \
-    --sims 800 \
-    --batch 256 \
-    --batch_train 128 \
-    --accumulation_steps 8 \
-    --train_epochs 1 \
-    --lr 1e-4 \
-    --grad_clip 1.0 \
-    --value_weight 1.0 \
-    --alternate_start_player \
-    --center_bias_strength 0.7 \
-    --center_bias_moves 10 \
-    --first_noise_moves 18 \
-    --resign_threshold -1.1 \
-    --use_amp \
-    --no_use_compile \
-    --no_use_onnx \
-    --selfplay_workers 2 \
-    --eval_games 0 \
-    --save_freq 5
+--no_use_onnx
 ```
 
-Replace:
+Use ONNX only when the environment has compatible versions of ONNX Runtime, CUDA, drivers, and optional TensorRT providers. If ONNX export or runtime inference fails, fall back to PyTorch inference.
+
+## 10. Running CaroNet
+
+CaroNet is executed through the same `training.py` entry point on Linux, macOS, Windows, Kaggle, Colab, or cloud GPU servers.
+
+The only environment-specific part is the path to the checkpoint. Replace:
 
 ```text
-<PATH_TO_CHECKPOINT>
+<CHECKPOINT_DIR>
 ```
 
 with the actual checkpoint directory.
 
 ---
 
-### 7.2 Local Linux / macOS
+### 8.1 Training Command
+
+The default command disables ONNX because the PyTorch backend is more reliable across local machines, Kaggle, Colab, and cloud GPU environments.
 
 ```bash
-cd /path/to/Gomoku-Training
-
-python training.py \
-    --mode train \
-    --init_model checkpoints/model_latest.pth \
-    --model_class v8_legacy \
-    --size 15 \
-    --channels 320 \
-    --res_blocks 20 \
-    --iters 200 \
-    --games_per_iter 64 \
-    --sims 800 \
-    --batch 256 \
-    --batch_train 128 \
-    --accumulation_steps 8 \
-    --train_epochs 1 \
-    --lr 1e-4 \
-    --grad_clip 1.0 \
-    --value_weight 1.0 \
-    --alternate_start_player \
-    --center_bias_strength 0.7 \
-    --center_bias_moves 10 \
-    --first_noise_moves 18 \
-    --resign_threshold -1.1 \
-    --use_amp \
-    --no_use_compile \
-    --no_use_onnx \
-    --selfplay_workers 2 \
-    --eval_games 0 \
-    --save_freq 5
+python training.py --mode train --init_model "<CHECKPOINT_DIR>/model_latest.pth" --model_class v8_legacy --size 15 --channels 320 --res_blocks 20 --iters 200 --games_per_iter 64 --sims 800 --batch 256 --batch_train 128 --accumulation_steps 8 --train_epochs 1 --lr 1e-4 --grad_clip 1.0 --value_weight 1.0 --alternate_start_player --center_bias_strength 0.7 --center_bias_moves 10 --first_noise_moves 18 --resign_threshold -1.1 --use_amp --no_use_compile --no_use_onnx --selfplay_workers 2 --eval_games 0 --save_freq 5
 ```
 
----
-
-### 7.3 Windows PowerShell
-
-```powershell
-cd "C:\path\to\Gomoku-Training"
-
-python training.py `
-    --mode train `
-    --init_model "checkpoints\model_latest.pth" `
-    --model_class v8_legacy `
-    --size 15 `
-    --channels 320 `
-    --res_blocks 20 `
-    --iters 200 `
-    --games_per_iter 64 `
-    --sims 800 `
-    --batch 256 `
-    --batch_train 128 `
-    --accumulation_steps 8 `
-    --train_epochs 1 `
-    --lr 1e-4 `
-    --grad_clip 1.0 `
-    --value_weight 1.0 `
-    --alternate_start_player `
-    --center_bias_strength 0.7 `
-    --center_bias_moves 10 `
-    --first_noise_moves 18 `
-    --resign_threshold -1.1 `
-    --use_amp `
-    --no_use_compile `
-    --no_use_onnx `
-    --selfplay_workers 2 `
-    --eval_games 0 `
-    --save_freq 5
-```
-
----
-
-### 7.4 Notebook Environments
-
-For notebook environments such as Kaggle or Colab, set the project directory first:
+For notebook environments such as Kaggle, Colab, or Jupyter, prefix the command with `!`:
 
 ```python
-PROJECT_DIR = "/path/to/Gomoku-Training"
-%cd $PROJECT_DIR
-```
-
-Then run:
-
-```python
-!python training.py \
-    --mode train \
-    --init_model "checkpoints/model_latest.pth" \
-    --model_class v8_legacy \
-    --size 15 \
-    --channels 320 \
-    --res_blocks 20 \
-    --iters 200 \
-    --games_per_iter 64 \
-    --sims 800 \
-    --batch 256 \
-    --batch_train 128 \
-    --accumulation_steps 8 \
-    --train_epochs 1 \
-    --lr 1e-4 \
-    --grad_clip 1.0 \
-    --value_weight 1.0 \
-    --alternate_start_player \
-    --center_bias_strength 0.7 \
-    --center_bias_moves 10 \
-    --first_noise_moves 18 \
-    --resign_threshold -1.1 \
-    --use_amp \
-    --no_use_compile \
-    --no_use_onnx \
-    --selfplay_workers 2 \
-    --eval_games 0 \
-    --save_freq 5
+!python training.py --mode train --init_model "<CHECKPOINT_DIR>/model_latest.pth" --model_class v8_legacy --size 15 --channels 320 --res_blocks 20 --iters 200 --games_per_iter 64 --sims 800 --batch 256 --batch_train 128 --accumulation_steps 8 --train_epochs 1 --lr 1e-4 --grad_clip 1.0 --value_weight 1.0 --alternate_start_player --center_bias_strength 0.7 --center_bias_moves 10 --first_noise_moves 18 --resign_threshold -1.1 --use_amp --no_use_compile --no_use_onnx --selfplay_workers 2 --eval_games 0 --save_freq 5
 ```
 
 ---
 
-## 8. Running One Self-Play Game
+### 8.2 Example Checkpoint Paths
 
-To test whether the model and MCTS run correctly:
+| Environment | Example checkpoint path |
+|---|---|
+| Local Linux/macOS | `checkpoints/model_latest.pth` |
+| Windows | `checkpoints/model_latest.pth` |
+| Kaggle | `/kaggle/working/CaroNet/checkpoints/model_latest.pth` |
+| Google Colab | `/content/drive/MyDrive/CaroNet/checkpoints/model_latest.pth` |
+| Cloud server | `/path/to/CaroNet/checkpoints/model_latest.pth` |
+
+Example:
+
+```bash
+python training.py --mode train --init_model "checkpoints/model_latest.pth" --model_class v8_legacy --size 15 --channels 320 --res_blocks 20 --iters 200 --games_per_iter 64 --sims 800 --batch 256 --batch_train 128 --accumulation_steps 8 --train_epochs 1 --lr 1e-4 --grad_clip 1.0 --value_weight 1.0 --alternate_start_player --center_bias_strength 0.7 --center_bias_moves 10 --first_noise_moves 18 --resign_threshold -1.1 --use_amp --no_use_compile --no_use_onnx --selfplay_workers 2 --eval_games 0 --save_freq 5
+```
+
+
+## 10. Running One Self-Play Game
+
+Use self-play mode to test whether the model and MCTS are working:
 
 ```bash
 python training.py \
@@ -667,45 +596,45 @@ python training.py \
 
 ---
 
-## 9. Important Parameters
+## 11. Important Parameters
 
 | Parameter | Description |
 |---|---|
 | `--mode` | `train` or `selfplay` |
-| `--init_model` | Path to checkpoint for resume/fine-tuning |
+| `--init_model` | Path to a checkpoint |
 | `--model_class` | Model architecture version |
 | `--size` | Board size |
-| `--win_length` | Number of stones needed to win |
+| `--win_length` | Number of stones required to win |
 | `--channels` | Model width |
 | `--res_blocks` | Number of residual blocks |
 | `--sims` | MCTS simulations per move |
 | `--c_puct` | PUCT exploration constant |
 | `--batch` | MCTS inference batch size |
-| `--games_per_iter` | Self-play games per training iteration |
+| `--games_per_iter` | Self-play games per iteration |
 | `--batch_train` | Training batch size |
-| `--accumulation_steps` | Micro-batch gradient accumulation |
+| `--accumulation_steps` | Micro-batch accumulation steps |
 | `--train_epochs` | Training passes per iteration |
 | `--lr` | Learning rate |
 | `--grad_clip` | Gradient clipping threshold |
-| `--value_weight` | Weight of value loss |
+| `--value_weight` | Value loss weight |
 | `--entropy_weight` | Entropy bonus weight |
 | `--first_noise_moves` | Number of opening moves with exploration noise |
 | `--center_bias_strength` | Strength of center opening bias |
 | `--center_bias_moves` | Duration of center bias |
-| `--alternate_start_player` | Alternate first player across self-play games |
-| `--resign_threshold` | Auto-resign threshold |
-| `--use_amp` | Enable mixed precision on CUDA |
-| `--use_compile` | Enable PyTorch compile when supported |
-| `--use_onnx` | Enable ONNX inference backend |
-| `--selfplay_workers` | Parallel self-play workers |
-| `--eval_games` | Number of arena games; set `0` to disable |
-| `--save_freq` | Periodic checkpoint frequency |
+| `--alternate_start_player` | Alternate starting player |
+| `--resign_threshold` | Auto-resignation threshold |
+| `--use_amp` | Enable mixed precision |
+| `--use_compile` | Enable PyTorch compile |
+| `--use_onnx` | Enable ONNX inference |
+| `--selfplay_workers` | Number of self-play workers |
+| `--eval_games` | Number of arena games; use `0` to disable |
+| `--save_freq` | Periodic checkpoint save frequency |
 
 ---
 
-## 10. Checkpointing
+## 12. Checkpointing
 
-The system saves several checkpoint types:
+CaroNet saves several checkpoint types:
 
 ```text
 checkpoints/model_latest.pth
@@ -717,11 +646,11 @@ checkpoints/model_final_size15.pth
 | File | Meaning |
 |---|---|
 | `model_latest.pth` | Most recent checkpoint |
-| `model_best.pth` | Best checkpoint according to arena evaluation |
+| `model_best.pth` | Best checkpoint according to evaluation |
 | `model_iterX.pth` | Periodic checkpoint |
-| `model_final_size15.pth` | Final checkpoint after training ends |
+| `model_final_size15.pth` | Final checkpoint |
 
-Checkpoint files may include:
+Checkpoint files may store:
 
 - model weights;
 - optimizer state;
@@ -731,7 +660,7 @@ Checkpoint files may include:
 
 ---
 
-## 11. Logging
+## 13. Logging
 
 Training metrics are written to:
 
@@ -739,11 +668,11 @@ Training metrics are written to:
 checkpoints/training_log.csv
 ```
 
-Typical logged fields include:
+Typical fields:
 
 | Field | Meaning |
 |---|---|
-| `iteration` | Current training iteration |
+| `iteration` | Current iteration |
 | `lr` | Learning rate |
 | `selfplay_time_sec` | Self-play duration |
 | `train_time_sec` | Training duration |
@@ -758,7 +687,7 @@ Typical logged fields include:
 
 ---
 
-## 12. Stability Checks
+## 14. Stability Checks
 
 A healthy training run should show:
 
@@ -769,7 +698,7 @@ No repeated game-length collapse
 Policy loss remains bounded
 Value loss remains bounded
 First-player win rate is not extremely imbalanced
-The model keeps tactical ability after further training
+The model keeps known tactical ability
 ```
 
 Warning signs:
@@ -785,11 +714,12 @@ New checkpoint playing worse than old checkpoint
 
 ---
 
-## 13. Tactical Evaluation
+## 15. Tactical Evaluation
 
-Loss alone is not enough. A Gomoku model should also be tested on fixed tactical positions.
+Loss alone is not enough.  
+A Caro/Gomoku model should be tested on fixed tactical positions.
 
-Suggested tactical tests:
+Suggested tests:
 
 1. Win in one move.
 2. Block opponent's immediate win.
@@ -804,9 +734,9 @@ Suggested tactical tests:
 
 ---
 
-## 14. Recommended Experiment Table
+## 16. Suggested Experiment Presets
 
-| Run | Board | Model | Sims | Games/iter | LR | Workers | Notes |
+| Preset | Board | Model | Sims | Games/iter | LR | Workers | Purpose |
 |---|---:|---|---:|---:|---:|---:|---|
 | Debug | 15x15 | v8_legacy 320x20 | 128 | 8 | 1e-4 | 1 | Quick pipeline check |
 | Fast test | 15x15 | v8_legacy 320x20 | 256 | 16 | 1e-4 | 1-2 | Short sanity run |
@@ -815,19 +745,22 @@ Suggested tactical tests:
 
 ---
 
-## 15. Environment Notes
+## 17. Environment Notes
 
 ### Local GPU
 
-Best for long training if the GPU has enough VRAM. Use `--use_amp` and tune `--selfplay_workers`.
+Best for long training if the GPU has enough VRAM.  
+Use AMP and tune self-play workers.
 
 ### Kaggle
 
-Use notebook commands with the correct project path. Avoid hardcoding Colab paths. Store outputs under `/kaggle/working` if persistence is needed.
+Avoid hardcoded personal paths.  
+Use `/kaggle/working` for generated outputs if persistence is needed.
 
 ### Google Colab
 
-Mount Drive if checkpoints must persist. Disable `torch.compile` if compatibility issues occur.
+Mount Drive only if checkpoints must persist.  
+Disable `torch.compile` if compatibility issues occur.
 
 ### CPU-only
 
@@ -842,7 +775,28 @@ res_blocks
 
 ---
 
-## 16. Future Improvements
+## 18. Files Not Included
+
+Large generated files should not be committed directly to the repository.
+
+Do not commit:
+
+```text
+*.pth
+*.pt
+*.onnx
+*.engine
+*.npz
+large logs
+training outputs
+TensorRT cache
+```
+
+Use external storage or release assets for large checkpoints.
+
+---
+
+## 19. Future Improvements
 
 Possible next steps:
 
@@ -852,15 +806,28 @@ Possible next steps:
 4. Add game length histogram logging.
 5. Add first-player win-rate tracking.
 6. Improve batched MCTS GPU inference.
-7. Benchmark ONNX/TensorRT inference.
+7. Benchmark ONNX/TensorRT inference as an optional experimental backend.
 8. Add a playable UI.
 9. Add model export scripts.
 10. Compare model sizes and simulation budgets.
 
 ---
 
-## 17. Conclusion
+## 20. License
 
-This project implements a complete AlphaZero-style Gomoku training system. It combines deep Policy-Value networks, MCTS, self-play, tactical move detection, prioritized replay, board augmentation, checkpoint recovery, and GPU-focused training optimizations.
+Copyright (c) 2026 Rin. All rights reserved.
 
-The system is suitable for experiments on both model strength and training efficiency. A strong checkpoint should be evaluated not only by loss values, but also by practical tactical behavior such as blocking, double-threat creation, fork handling, and forced-win conversion.
+This project is publicly available for viewing and reference purposes only.  
+Copying, modifying, redistributing, sublicensing, publishing, selling, or using this code in other projects is not permitted without explicit written permission from the author.
+
+See the `LICENSE` file for details.
+
+---
+
+## 21. Conclusion
+
+CaroNet is a complete AlphaZero-style training system for Caro/Gomoku.  
+It combines deep Policy-Value networks, MCTS, self-play, tactical move detection, prioritized replay, board augmentation, checkpoint recovery, and GPU-focused optimization.
+
+The system is suitable for experiments on both model strength and training efficiency.  
+A strong checkpoint should be evaluated not only by loss values, but also by practical tactical behavior such as blocking, fork creation, double-threat handling, and forced-win conversion.
