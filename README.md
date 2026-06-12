@@ -1,111 +1,149 @@
 # Gomoku AlphaZero Training System
 
-A deep reinforcement learning system for training a Gomoku/Caro AI using **self-play**, **Monte Carlo Tree Search (MCTS)**, and a deep **Policy-Value neural network**.
+A GPU-accelerated AlphaZero-style training system for Gomoku/Caro. The project combines **self-play reinforcement learning**, **Monte Carlo Tree Search (MCTS)**, **deep Policy-Value neural networks**, tactical search shortcuts, prioritized replay, checkpoint recovery, and multiple performance optimizations for long-running training.
 
-This repository is designed for training a strong 15x15 Gomoku model, with support for checkpoint recovery, tactical move detection, replay buffer training, mixed precision, and long-running experiments on GPU environments such as Google Colab.
+The codebase is designed to run in different environments, including local machines, Google Colab, Kaggle notebooks, and cloud GPU instances. Paths and runtime flags should be adjusted according to the target environment.
 
 ---
 
-## 1. Overview
+## 1. What This Project Does
 
-The project follows the AlphaZero-style training approach:
+This project trains a Gomoku agent without human game records. The model improves by repeatedly playing against itself.
 
-1. A neural network predicts:
-   - a policy distribution over legal moves;
-   - a value estimate for the current board state.
+At each move:
 
-2. MCTS uses the network to search possible continuations and produce a stronger move distribution.
+1. The neural network evaluates the board.
+2. MCTS searches candidate continuations.
+3. The search visit distribution becomes the training target.
+4. The final game outcome becomes the value target.
 
-3. The model plays games against itself.
-
-4. The generated self-play data is stored in a replay buffer.
-
-5. The neural network is trained from the self-play data.
-
-6. The updated checkpoint is saved and used for the next training iteration.
-
-In simple terms:
+The training loop is:
 
 ```text
-Neural Network → MCTS → Self-play Games → Replay Buffer → Training → New Checkpoint
+Current checkpoint
+      |
+      v
+Self-play with MCTS
+      |
+      v
+Replay buffer
+      |
+      v
+Policy-Value training
+      |
+      v
+New checkpoint
+      |
+      v
+Repeat
 ```
 
 ---
 
-## 2. Main Algorithms
+## 2. Core Algorithms
 
 ### 2.1 AlphaZero-style Self-Play
 
-The system trains without human game records. Instead, the model improves by repeatedly playing against itself.
+The system follows the AlphaZero idea: instead of learning from expert games, the model creates its own dataset through self-play.
 
-Each self-play game produces training samples:
+Each generated sample contains:
 
 ```text
-(state, improved_policy, final_result)
+(state, policy_target, value_target)
 ```
 
 Where:
 
-- `state` is the current board position.
-- `improved_policy` is the move distribution produced by MCTS.
-- `final_result` is the final game outcome from the current player's perspective.
+| Component | Meaning |
+|---|---|
+| `state` | Encoded board state from the current player's perspective |
+| `policy_target` | Improved move distribution produced by MCTS |
+| `value_target` | Final game result from the current player's perspective |
 
-The model is then trained to imitate the MCTS policy and predict the final result.
+The network learns both move selection and position evaluation.
 
 ---
 
-### 2.2 Monte Carlo Tree Search
+### 2.2 Policy-Value Network
 
-MCTS is used to improve move selection. Instead of directly choosing the move predicted by the neural network, the system performs multiple simulations from the current position.
+The neural network has two heads:
 
-The MCTS process consists of:
+| Head | Output | Purpose |
+|---|---|---|
+| Policy head | Move logits over all board cells | Predicts promising moves |
+| Value head | Scalar in `[-1, 1]` | Predicts win/loss expectation |
 
-1. **Selection**  
-   Traverse the search tree using a PUCT-style score.
+For a 15x15 board, the policy head outputs:
 
-2. **Expansion**  
-   Expand promising child nodes.
+```text
+15 × 15 = 225 logits
+```
 
-3. **Evaluation**  
-   Use the Policy-Value network to evaluate leaf positions.
+The value output represents the expected result:
 
-4. **Backup**  
-   Backpropagate the value estimate through the visited nodes.
+| Value | Interpretation |
+|---:|---|
+| `1.0` | Current player is winning |
+| `0.0` | Balanced or uncertain position |
+| `-1.0` | Current player is losing |
 
-5. **Action Selection**  
-   Choose a move based on visit counts.
+---
 
-The number of simulations is controlled by:
+### 2.3 Board State Encoding
+
+The board is encoded using multiple planes:
+
+```text
+[current_player_stones, opponent_stones, empty_cells, row_coordinates, column_coordinates]
+```
+
+The optional coordinate planes help the network distinguish center, edge, and corner positions. This matters in Gomoku because opening strength is not position-invariant in practical play.
+
+---
+
+### 2.4 Monte Carlo Tree Search
+
+MCTS improves the raw policy from the neural network by running simulations before selecting a move.
+
+Each MCTS simulation performs:
+
+1. **Selection**: choose a child node using PUCT.
+2. **Expansion**: add candidate child moves.
+3. **Evaluation**: use the Policy-Value network to evaluate a leaf position.
+4. **Backup**: propagate the value estimate through the path.
+5. **Move selection**: use visit counts to form the final policy target.
+
+The key MCTS parameter is:
 
 ```bash
 --sims
 ```
 
-For the current strong model setup, the system commonly uses:
+Example:
 
-```text
-sims = 800
+```bash
+--sims 800
 ```
 
-This produces higher-quality self-play targets, but it is computationally expensive.
+Higher simulation counts produce stronger targets but increase self-play time significantly.
 
 ---
 
-### 2.3 PUCT Search Formula
+### 2.5 PUCT Selection
 
-MCTS uses a PUCT-style balance between exploitation and exploration.
-
-Conceptually:
+The MCTS implementation uses a PUCT-style selection score:
 
 ```text
-score = Q(s, a) + U(s, a)
+score(s, a) = Q(s, a) + U(s, a)
 ```
 
 Where:
 
-- `Q(s, a)` estimates the value of choosing action `a`.
-- `U(s, a)` encourages exploration based on the prior probability from the neural network.
-- `c_puct` controls the exploration strength.
+| Term | Meaning |
+|---|---|
+| `Q(s, a)` | Estimated value of action `a` |
+| `U(s, a)` | Exploration bonus based on prior probability |
+| `c_puct` | Controls exploration strength |
 
 The parameter is controlled by:
 
@@ -113,25 +151,13 @@ The parameter is controlled by:
 --c_puct
 ```
 
-Default / common value:
-
-```text
-c_puct = 3.5
-```
-
 ---
 
-### 2.4 Progressive Widening
+### 2.6 Progressive Widening
 
-The MCTS implementation supports progressive widening. Instead of expanding all legal moves immediately, the search gradually expands more moves as visit count increases.
+The MCTS implementation supports progressive widening. Instead of expanding every legal move at once, it gradually expands more moves as the node receives more visits.
 
-This is useful for Gomoku because the branching factor is large, especially in early game positions.
-
-Benefits:
-
-- reduces search overhead;
-- focuses simulations on promising moves;
-- improves efficiency on large boards.
+This reduces wasted computation in early-game positions where the branching factor is large.
 
 Controlled by:
 
@@ -142,333 +168,333 @@ Controlled by:
 
 ---
 
-### 2.5 Tactical Move Detection
+### 2.7 Tactical Move Bypass
 
-The MCTS system includes tactical shortcuts for obvious forced moves.
+Before running full MCTS, the self-play logic checks tactical conditions such as:
 
-Before running full MCTS, the engine checks for:
+- immediate winning move;
+- immediate blocking move;
+- fork or double-threat creation.
 
-- immediate winning moves;
-- immediate blocking moves;
-- fork-like tactical threats.
+If a forced tactical move exists, the system can bypass full MCTS and directly assign the policy target to that move.
 
-This is important in Gomoku because missing a direct win or a direct block is usually catastrophic.
-
-The tactical logic helps the model handle patterns such as:
-
-- five-in-a-row completion;
-- blocking opponent's four;
-- forced winning moves;
-- double-threat situations.
+This improves tactical reliability and avoids wasting simulations on obvious forced positions.
 
 ---
 
-### 2.6 Opening Exploration
+### 2.8 Fork and Double-Threat Detection
 
-The self-play system supports early-game exploration through:
+The code includes logic for detecting moves that create multiple winning threats. Instead of scanning the whole board for every candidate, the optimized fork search checks only a local window around the candidate move.
+
+This is important for Gomoku because double threats are often decisive.
+
+---
+
+### 2.9 Zobrist Hashing
+
+MCTS uses Zobrist hashing to represent board states efficiently. Hashing allows fast state identification and supports search reuse across moves.
+
+This helps reduce repeated computation during tree search.
+
+---
+
+### 2.10 Opening Exploration
+
+Early self-play moves can receive exploration noise:
 
 ```bash
---first_noise_moves
+--first_noise_moves 18
 ```
 
-This adds noise to early moves so that self-play games do not always follow the same opening.
-
-Example:
-
-```text
-first_noise_moves = 18
-```
-
-This means the first 18 moves can receive additional exploration noise.
+This prevents the model from always generating the same openings and improves dataset diversity.
 
 ---
 
-### 2.7 Center Bias
+### 2.11 Center Bias
 
-Gomoku openings are usually stronger near the center of the board. The project supports optional center bias during early moves.
-
-Controlled by:
+The training pipeline supports optional opening center bias:
 
 ```bash
---center_bias_strength
---center_bias_moves
+--center_bias_strength 0.7
+--center_bias_moves 10
 ```
 
-Example:
-
-```text
-center_bias_strength = 0.7
-center_bias_moves = 10
-```
-
-This encourages early self-play moves to stay near the center, reducing low-quality corner openings during training.
+This encourages early self-play moves near the board center. It is useful because center control is usually stronger in Gomoku openings.
 
 ---
 
-### 2.8 Alternating Start Player
+### 2.12 Alternating Start Player
 
-To reduce first-player bias, the training system can alternate which side starts each self-play game.
-
-Controlled by:
+The flag:
 
 ```bash
 --alternate_start_player
 ```
 
-This helps prevent the dataset from becoming too biased toward one side.
+alternates the first player across self-play games. This reduces first-player bias in the generated dataset.
 
 ---
 
-## 3. Neural Network
+## 3. Engineering and Performance Optimizations
 
-The project uses a deep convolutional Policy-Value network.
+The project includes several algorithmic and systems-level optimizations.
 
-The current strong checkpoint setup uses:
+### 3.1 Numba-Accelerated Board Logic
 
-```text
-model_class = v8_legacy
-board_size = 15
-channels = 320
-res_blocks = 20
-use_coords = true
-```
+Critical board operations are accelerated with Numba JIT compilation, including:
 
----
+- win checking;
+- neighbor detection;
+- tactical winning/blocking masks;
+- fork detection;
+- PUCT child selection.
 
-### 3.1 Input Representation
-
-Each board state is converted into tensor planes.
-
-Typical input planes:
-
-```text
-[current_player_stones, opponent_stones, empty_cells, row_coordinates, col_coordinates]
-```
-
-The coordinate planes help the model understand absolute board position, which is useful because center control matters in Gomoku.
+This reduces Python overhead inside MCTS.
 
 ---
 
-### 3.2 Policy Head
+### 3.2 Localized Tactical Scanning
 
-The policy head outputs logits for all board positions.
-
-For a 15x15 board:
-
-```text
-15 × 15 = 225 possible moves
-```
-
-So the policy output has 225 logits.
-
-The model learns to match the MCTS visit distribution.
+Fork detection only scans within the win-length radius of a candidate move instead of scanning the whole board. This reduces unnecessary board checks during tactical analysis.
 
 ---
 
-### 3.3 Value Head
+### 3.3 Progressive MCTS Expansion
 
-The value head outputs one scalar:
-
-```text
-value ∈ [-1, 1]
-```
-
-Interpretation:
-
-| Value | Meaning |
-|---:|---|
-| `1` | Current player is likely winning |
-| `0` | Balanced / uncertain |
-| `-1` | Current player is likely losing |
-
-The value head allows MCTS to evaluate positions without rolling out games to the end.
+Progressive widening limits how many child nodes are expanded early, reducing search cost in high-branching positions.
 
 ---
 
-## 4. Training Objective
+### 3.4 Batched Neural Network Evaluation
 
-The model is trained using a combined Policy-Value loss.
-
-```text
-loss = policy_loss + value_weight × value_loss - entropy_weight × entropy
-```
-
-### Policy Loss
-
-The policy loss trains the network to imitate the MCTS-improved move distribution.
-
-### Value Loss
-
-The value loss trains the network to predict the final game result.
-
-### Entropy Bonus
-
-The entropy term prevents the policy from becoming too confident too early.
-
-### Gradient Clipping
-
-Gradient clipping is used to prevent unstable updates:
+MCTS supports batched neural network evaluation through the `--batch` parameter:
 
 ```bash
---grad_clip 1.0
+--batch 256
 ```
 
----
-
-## 5. Replay Buffer
-
-Self-play data is stored in a replay buffer.
-
-The replay buffer stores:
-
-```text
-state tensors
-policy targets
-value targets
-sample priorities
-```
-
-The system supports prioritized sampling, which can help the model learn more from important or difficult positions.
+Batching improves GPU utilization when many leaf nodes need network inference.
 
 ---
 
-## 6. Data Augmentation
+### 3.5 Root Reuse
 
-The project supports board symmetry augmentation.
-
-Gomoku positions can be transformed by:
-
-- rotation;
-- horizontal flip;
-- equivalent board symmetries.
-
-This increases the effective dataset size and helps the model generalize.
-
-If coordinate planes are used, they are regenerated after augmentation so that they remain correct absolute coordinate maps.
+After a move is selected, the MCTS tree can reuse the corresponding child node as the new root. This avoids discarding all search information after every move.
 
 ---
 
-## 7. Checkpoint System
+### 3.6 Prioritized Replay Buffer
 
-The training system supports checkpoint saving and recovery.
-
-Common checkpoint files:
-
-```text
-checkpoints/model_latest.pth
-checkpoints/model_best.pth
-checkpoints/model_iterX.pth
-checkpoints/model_final_size15.pth
-```
-
-### `model_latest.pth`
-
-The newest checkpoint. Used for continuing training.
-
-### `model_best.pth`
-
-The best checkpoint according to evaluation, if arena evaluation is enabled.
-
-### `model_iterX.pth`
-
-Periodic checkpoint saved every `save_freq` iterations.
-
-### `model_final_size15.pth`
-
-Final model after the training run completes.
-
-Checkpoints store:
-
-- model weights;
-- optimizer state;
-- AMP scaler state;
-- model configuration;
-- iteration number.
-
-This allows training to resume from the next iteration.
+The replay buffer uses a Fenwick tree for efficient weighted priority sampling. This allows sampling important positions more efficiently than uniform-only replay.
 
 ---
 
-## 8. Technologies Used
+### 3.7 Preallocated Replay Storage
 
-### Core Technologies
-
-| Technology | Usage |
-|---|---|
-| Python | Main programming language |
-| PyTorch | Neural network training and inference |
-| NumPy | Board representation and numerical operations |
-| Numba | JIT acceleration for tactical board checks |
-| SciPy | Board utility operations |
-| CUDA | GPU acceleration |
-| AMP | Mixed precision training |
-| Google Colab | Cloud GPU training environment |
+The replay buffer uses preallocated NumPy arrays for states, policies, values, and priorities. This avoids repeated memory allocation during long training runs.
 
 ---
 
-### PyTorch
+### 3.8 Board Symmetry Augmentation
 
-PyTorch is used for:
+The augmentation module supports rotations and flips of board states and policy targets. This increases data diversity without requiring extra self-play games.
 
-- defining neural network models;
-- GPU training;
-- mixed precision;
-- optimizer and scheduler;
-- checkpoint saving/loading.
+When coordinate planes are used, they are regenerated after augmentation to preserve correct absolute coordinates.
 
 ---
 
-### CUDA
+### 3.9 Mixed Precision Training
 
-CUDA is used when available:
-
-```text
-Device: CUDA
-```
-
-Self-play and training can both use GPU acceleration, although MCTS also relies heavily on CPU-side tree search logic.
-
----
-
-### Automatic Mixed Precision
-
-AMP is enabled with:
+The training loop supports automatic mixed precision:
 
 ```bash
 --use_amp
 ```
 
-Benefits:
-
-- lower VRAM usage;
-- faster neural network inference/training;
-- better suitability for Colab GPUs.
+AMP can reduce VRAM usage and speed up training on CUDA GPUs.
 
 ---
 
-### Numba
+### 3.10 Channels-Last Memory Format
 
-Numba is used to accelerate low-level board logic, especially:
-
-- win checking;
-- tactical move detection;
-- local board scanning;
-- fork detection.
-
-This matters because MCTS calls board evaluation logic many times.
+When CUDA is used, the model can be moved to channels-last memory format, which may improve convolution performance on supported GPUs.
 
 ---
 
-## 9. Main Training Command
+### 3.11 TF32 Acceleration
 
-Recommended command for continuing training from a strong checkpoint on Google Colab:
+On compatible NVIDIA GPUs, TF32 matrix multiplication can be enabled for faster training and inference.
 
-```python
-%cd /content/drive/MyDrive/Gomoku-Training
+---
 
-!python training.py \
+### 3.12 Gradient Accumulation
+
+The training code supports gradient accumulation:
+
+```bash
+--accumulation_steps 8
+```
+
+In this codebase, accumulation splits the training batch into smaller micro-batches to reduce VRAM usage while preserving the intended effective batch behavior.
+
+---
+
+### 3.13 Gradient Clipping
+
+Gradient clipping improves stability:
+
+```bash
+--grad_clip 1.0
+```
+
+This prevents very large gradient updates from destabilizing training.
+
+---
+
+### 3.14 Learning Rate Warmup and Cosine Annealing
+
+The optimizer uses a learning rate schedule with:
+
+1. warmup phase;
+2. cosine annealing phase;
+3. non-zero minimum learning rate ratio.
+
+This helps avoid unstable early updates while still reducing learning rate over time.
+
+---
+
+### 3.15 Fused AdamW Fallback
+
+The training loop tries to use fused AdamW when safe and available. If it is not supported, it falls back to standard AdamW.
+
+---
+
+### 3.16 Optional `torch.compile`
+
+The code supports optional PyTorch compilation:
+
+```bash
+--use_compile
+--no_use_compile
+```
+
+This can improve performance in some Linux/CUDA environments, but it may be disabled for compatibility.
+
+---
+
+### 3.17 Optional ONNX Runtime Inference
+
+The project includes an ONNX wrapper for inference acceleration. It can use available providers such as CUDA or TensorRT when supported.
+
+Controlled by:
+
+```bash
+--use_onnx
+--no_use_onnx
+```
+
+---
+
+### 3.18 Parallel Self-Play
+
+The training loop supports parallel self-play workers:
+
+```bash
+--selfplay_workers 2
+```
+
+On CPU, multiprocessing can be used. On CUDA, thread-based parallelism can be used to share the GPU model.
+
+The optimal number of workers depends on:
+
+- CPU speed;
+- GPU type;
+- board size;
+- MCTS simulations;
+- batch size;
+- memory bandwidth.
+
+---
+
+### 3.19 Atomic Checkpoint Saving
+
+Checkpoint saving uses a temporary file followed by atomic replacement. This reduces the chance of corrupting a checkpoint if the process is interrupted while saving.
+
+---
+
+## 4. Technologies Used
+
+| Technology | Purpose |
+|---|---|
+| Python | Main language |
+| PyTorch | Neural network training and inference |
+| CUDA | GPU acceleration |
+| AMP | Mixed precision training |
+| NumPy | Board and replay data handling |
+| Numba | JIT acceleration for board logic |
+| SciPy | Board utility operations |
+| ONNX Runtime | Optional inference backend |
+| TensorRT | Optional accelerated ONNX provider |
+| CSV logging | Training metric tracking |
+
+---
+
+## 5. Project Structure
+
+```text
+Gomoku-Training/
+├── training.py              # CLI entry point
+├── training_loop.py         # Main training loop, checkpointing, scheduling
+├── self_play.py             # Self-play game generation
+├── mcts.py                  # Progressive MCTS and tactical search
+├── models.py                # Main model architectures
+├── legacy_models.py         # Legacy-compatible model architectures
+├── loss.py                  # Policy-value loss and optimizer steps
+├── replay_buffer.py         # Prioritized replay buffer
+├── augmentation.py          # Board symmetry augmentation
+├── checkpoint_utils.py      # Checkpoint save/load helpers
+├── evaluate.py              # Arena evaluation
+├── config.py                # CLI arguments and default configs
+├── utils.py                 # Board encoding and win checking
+└── checkpoints/             # Saved checkpoints
+```
+
+---
+
+## 6. Installation
+
+### 6.1 Basic Requirements
+
+Install the main dependencies:
+
+```bash
+pip install torch numpy scipy numba
+```
+
+For ONNX inference:
+
+```bash
+pip install onnx onnxruntime
+```
+
+For GPU ONNX Runtime, install the correct package for the target environment.
+
+---
+
+## 7. Running the Project
+
+The repository is environment-agnostic. Use the same `training.py` entry point on local machines, Kaggle, Colab, or cloud GPU servers.
+
+---
+
+### 7.1 Generic Training Command
+
+Use this form for any environment:
+
+```bash
+python training.py \
     --mode train \
-    --init_model "/content/drive/MyDrive/Gomoku-Training/checkpoints/model_latest.pth" \
+    --init_model "<PATH_TO_CHECKPOINT>/model_latest.pth" \
     --model_class v8_legacy \
     --size 15 \
     --channels 320 \
@@ -492,189 +518,349 @@ Recommended command for continuing training from a strong checkpoint on Google C
     --no_use_compile \
     --no_use_onnx \
     --selfplay_workers 2 \
-    --eval_freq 1000 \
+    --eval_games 0 \
+    --save_freq 5
+```
+
+Replace:
+
+```text
+<PATH_TO_CHECKPOINT>
+```
+
+with the actual checkpoint directory.
+
+---
+
+### 7.2 Local Linux / macOS
+
+```bash
+cd /path/to/Gomoku-Training
+
+python training.py \
+    --mode train \
+    --init_model checkpoints/model_latest.pth \
+    --model_class v8_legacy \
+    --size 15 \
+    --channels 320 \
+    --res_blocks 20 \
+    --iters 200 \
+    --games_per_iter 64 \
+    --sims 800 \
+    --batch 256 \
+    --batch_train 128 \
+    --accumulation_steps 8 \
+    --train_epochs 1 \
+    --lr 1e-4 \
+    --grad_clip 1.0 \
+    --value_weight 1.0 \
+    --alternate_start_player \
+    --center_bias_strength 0.7 \
+    --center_bias_moves 10 \
+    --first_noise_moves 18 \
+    --resign_threshold -1.1 \
+    --use_amp \
+    --no_use_compile \
+    --no_use_onnx \
+    --selfplay_workers 2 \
     --eval_games 0 \
     --save_freq 5
 ```
 
 ---
 
-## 10. Parameter Explanation
+### 7.3 Windows PowerShell
 
-| Parameter | Meaning |
-|---|---|
-| `--mode train` | Run full training loop |
-| `--init_model` | Load an existing checkpoint |
-| `--model_class v8_legacy` | Use architecture compatible with old checkpoint |
-| `--size 15` | Use 15x15 board |
-| `--channels 320` | Network width |
-| `--res_blocks 20` | Number of residual blocks |
-| `--iters 200` | Final training iteration |
-| `--games_per_iter 64` | Number of self-play games per iteration |
-| `--sims 800` | MCTS simulations per move |
-| `--batch 256` | MCTS inference batch size |
-| `--batch_train 128` | Training batch size |
-| `--accumulation_steps 8` | Split training batch into smaller micro-batches |
-| `--train_epochs 1` | One training pass per iteration |
-| `--lr 1e-4` | Conservative learning rate for checkpoint continuation |
-| `--grad_clip 1.0` | Prevent gradient explosion |
-| `--value_weight 1.0` | Weight of value loss |
-| `--alternate_start_player` | Alternate first player |
-| `--center_bias_strength 0.7` | Opening center preference |
-| `--center_bias_moves 10` | Center bias duration |
-| `--first_noise_moves 18` | Exploration noise duration |
-| `--resign_threshold -1.1` | Disable resignation |
-| `--use_amp` | Enable mixed precision |
-| `--no_use_compile` | Disable torch.compile |
-| `--no_use_onnx` | Disable ONNX inference |
-| `--selfplay_workers 2` | Parallel self-play workers |
-| `--eval_games 0` | Disable arena evaluation |
-| `--save_freq 5` | Save periodic checkpoint every 5 iterations |
+```powershell
+cd "C:\path\to\Gomoku-Training"
+
+python training.py `
+    --mode train `
+    --init_model "checkpoints\model_latest.pth" `
+    --model_class v8_legacy `
+    --size 15 `
+    --channels 320 `
+    --res_blocks 20 `
+    --iters 200 `
+    --games_per_iter 64 `
+    --sims 800 `
+    --batch 256 `
+    --batch_train 128 `
+    --accumulation_steps 8 `
+    --train_epochs 1 `
+    --lr 1e-4 `
+    --grad_clip 1.0 `
+    --value_weight 1.0 `
+    --alternate_start_player `
+    --center_bias_strength 0.7 `
+    --center_bias_moves 10 `
+    --first_noise_moves 18 `
+    --resign_threshold -1.1 `
+    --use_amp `
+    --no_use_compile `
+    --no_use_onnx `
+    --selfplay_workers 2 `
+    --eval_games 0 `
+    --save_freq 5
+```
 
 ---
 
-## 11. Monitoring Training
+### 7.4 Notebook Environments
 
-Important training indicators:
+For notebook environments such as Kaggle or Colab, set the project directory first:
 
-| Metric | Meaning |
+```python
+PROJECT_DIR = "/path/to/Gomoku-Training"
+%cd $PROJECT_DIR
+```
+
+Then run:
+
+```python
+!python training.py \
+    --mode train \
+    --init_model "checkpoints/model_latest.pth" \
+    --model_class v8_legacy \
+    --size 15 \
+    --channels 320 \
+    --res_blocks 20 \
+    --iters 200 \
+    --games_per_iter 64 \
+    --sims 800 \
+    --batch 256 \
+    --batch_train 128 \
+    --accumulation_steps 8 \
+    --train_epochs 1 \
+    --lr 1e-4 \
+    --grad_clip 1.0 \
+    --value_weight 1.0 \
+    --alternate_start_player \
+    --center_bias_strength 0.7 \
+    --center_bias_moves 10 \
+    --first_noise_moves 18 \
+    --resign_threshold -1.1 \
+    --use_amp \
+    --no_use_compile \
+    --no_use_onnx \
+    --selfplay_workers 2 \
+    --eval_games 0 \
+    --save_freq 5
+```
+
+---
+
+## 8. Running One Self-Play Game
+
+To test whether the model and MCTS run correctly:
+
+```bash
+python training.py \
+    --mode selfplay \
+    --init_model checkpoints/model_latest.pth \
+    --model_class v8_legacy \
+    --size 15 \
+    --channels 320 \
+    --res_blocks 20 \
+    --sims 800
+```
+
+---
+
+## 9. Important Parameters
+
+| Parameter | Description |
 |---|---|
-| `Avg Len(last10)` | Average length of recent games |
-| `policy_loss` | How well the model learns MCTS policy |
-| `value_loss` | How well the model predicts result |
-| `total_loss` | Combined loss |
-| `p1_wins` / `p2_wins` | First-player balance |
-| `draws` | Draw count |
-| `selfplay_time_sec` | Time spent generating games |
-| `train_time_sec` | Time spent training network |
+| `--mode` | `train` or `selfplay` |
+| `--init_model` | Path to checkpoint for resume/fine-tuning |
+| `--model_class` | Model architecture version |
+| `--size` | Board size |
+| `--win_length` | Number of stones needed to win |
+| `--channels` | Model width |
+| `--res_blocks` | Number of residual blocks |
+| `--sims` | MCTS simulations per move |
+| `--c_puct` | PUCT exploration constant |
+| `--batch` | MCTS inference batch size |
+| `--games_per_iter` | Self-play games per training iteration |
+| `--batch_train` | Training batch size |
+| `--accumulation_steps` | Micro-batch gradient accumulation |
+| `--train_epochs` | Training passes per iteration |
+| `--lr` | Learning rate |
+| `--grad_clip` | Gradient clipping threshold |
+| `--value_weight` | Weight of value loss |
+| `--entropy_weight` | Entropy bonus weight |
+| `--first_noise_moves` | Number of opening moves with exploration noise |
+| `--center_bias_strength` | Strength of center opening bias |
+| `--center_bias_moves` | Duration of center bias |
+| `--alternate_start_player` | Alternate first player across self-play games |
+| `--resign_threshold` | Auto-resign threshold |
+| `--use_amp` | Enable mixed precision on CUDA |
+| `--use_compile` | Enable PyTorch compile when supported |
+| `--use_onnx` | Enable ONNX inference backend |
+| `--selfplay_workers` | Parallel self-play workers |
+| `--eval_games` | Number of arena games; set `0` to disable |
+| `--save_freq` | Periodic checkpoint frequency |
+
+---
+
+## 10. Checkpointing
+
+The system saves several checkpoint types:
+
+```text
+checkpoints/model_latest.pth
+checkpoints/model_best.pth
+checkpoints/model_iterX.pth
+checkpoints/model_final_size15.pth
+```
+
+| File | Meaning |
+|---|---|
+| `model_latest.pth` | Most recent checkpoint |
+| `model_best.pth` | Best checkpoint according to arena evaluation |
+| `model_iterX.pth` | Periodic checkpoint |
+| `model_final_size15.pth` | Final checkpoint after training ends |
+
+Checkpoint files may include:
+
+- model weights;
+- optimizer state;
+- AMP scaler state;
+- model configuration;
+- iteration number.
+
+---
+
+## 11. Logging
+
+Training metrics are written to:
+
+```text
+checkpoints/training_log.csv
+```
+
+Typical logged fields include:
+
+| Field | Meaning |
+|---|---|
+| `iteration` | Current training iteration |
+| `lr` | Learning rate |
+| `selfplay_time_sec` | Self-play duration |
+| `train_time_sec` | Training duration |
 | `buffer_size` | Replay buffer size |
+| `p1_wins` | Player 1 wins |
+| `p2_wins` | Player 2 wins |
+| `draws` | Draw count |
+| `avg_game_length` | Average game length |
+| `total_loss` | Combined loss |
+| `policy_loss` | Policy head loss |
+| `value_loss` | Value head loss |
 
 ---
 
-## 12. Signs of a Stable Run
+## 12. Stability Checks
 
-A training run is considered stable when:
+A healthy training run should show:
 
 ```text
 No NaN or Inf loss
-No CUDA out-of-memory error
-Game length does not collapse repeatedly
-Policy loss does not explode
+No repeated CUDA out-of-memory errors
+No repeated game-length collapse
+Policy loss remains bounded
 Value loss remains bounded
 First-player win rate is not extremely imbalanced
-The model still handles known tactical positions
+The model keeps tactical ability after further training
 ```
 
----
-
-## 13. Tactical Skills to Test
-
-A strong Gomoku model should be tested on positions involving:
-
-1. Immediate win.
-2. Immediate block.
-3. Open three.
-4. Open four.
-5. Double threat.
-6. Fork creation.
-7. Forced defense.
-8. Central opening control.
-9. Avoiding obvious traps.
-10. Converting winning sequences.
-
-These tests are important because loss values alone do not prove that the model is stronger.
-
----
-
-## 14. Why 800 MCTS Simulations?
-
-Lower simulation counts such as 128 or 256 are useful for debugging, but they produce weaker search targets.
-
-Using 800 simulations provides:
-
-- stronger move targets;
-- better tactical awareness;
-- better double-threat detection;
-- more reliable self-play games.
-
-The trade-off is much slower training.
-
----
-
-## 15. Why Use a Lower Learning Rate?
-
-When continuing from a strong checkpoint, the goal is not to relearn everything quickly. The goal is to improve without damaging previously learned knowledge.
-
-A learning rate of:
+Warning signs:
 
 ```text
-1e-4
+Average game length repeatedly below 15 moves
+Loss explosion
+Value loss dominating total loss
+Policy collapse
+One side winning almost all games
+New checkpoint playing worse than old checkpoint
 ```
 
-is safer than:
+---
+
+## 13. Tactical Evaluation
+
+Loss alone is not enough. A Gomoku model should also be tested on fixed tactical positions.
+
+Suggested tactical tests:
+
+1. Win in one move.
+2. Block opponent's immediate win.
+3. Create open three.
+4. Create open four.
+5. Create double threat.
+6. Block double threat.
+7. Convert forced win sequence.
+8. Avoid obvious trap.
+9. Choose strong center opening.
+10. Defend against fork setup.
+
+---
+
+## 14. Recommended Experiment Table
+
+| Run | Board | Model | Sims | Games/iter | LR | Workers | Notes |
+|---|---:|---|---:|---:|---:|---:|---|
+| Debug | 15x15 | v8_legacy 320x20 | 128 | 8 | 1e-4 | 1 | Quick pipeline check |
+| Fast test | 15x15 | v8_legacy 320x20 | 256 | 16 | 1e-4 | 1-2 | Short sanity run |
+| Stable recovery | 15x15 | v8_legacy 320x20 | 800 | 64 | 1e-4 | 2 | Continue strong checkpoint |
+| Heavy training | 15x15 | v8_legacy 320x20 | 800 | 128 | 1e-4 | 2-4 | Long high-quality run |
+
+---
+
+## 15. Environment Notes
+
+### Local GPU
+
+Best for long training if the GPU has enough VRAM. Use `--use_amp` and tune `--selfplay_workers`.
+
+### Kaggle
+
+Use notebook commands with the correct project path. Avoid hardcoding Colab paths. Store outputs under `/kaggle/working` if persistence is needed.
+
+### Google Colab
+
+Mount Drive if checkpoints must persist. Disable `torch.compile` if compatibility issues occur.
+
+### CPU-only
+
+CPU training is possible but slow. Reduce:
 
 ```text
-3e-4
+sims
+games_per_iter
+channels
+res_blocks
 ```
 
-for long-term fine-tuning of a large model.
-
 ---
 
-## 16. Worker Count
+## 16. Future Improvements
 
-`--selfplay_workers` controls how many self-play games are generated in parallel.
-
-For Colab, a safe default is:
-
-```text
-selfplay_workers = 2
-```
-
-Four workers may or may not be faster. More workers can cause:
-
-- CPU bottleneck;
-- GPU inference contention;
-- RAM pressure;
-- slower CPU-GPU data transfer.
-
-The best approach is to benchmark 2 vs 4 workers for one iteration.
-
----
-
-## 17. Suggested Experiment Log
-
-| Iteration | Sims | Games/iter | LR | Avg length | Policy loss | Value loss | Notes |
-|---|---:|---:|---:|---:|---:|---:|---|
-| 106 | 800 | 64 | 3e-4 | TBD | TBD | TBD | Before LR change |
-| 110 | 800 | 64 | 1e-4 | TBD | TBD | TBD | After LR change |
-| 120 | 800 | 64 | 1e-4 | TBD | TBD | TBD | Stability check |
-| 150 | 800 | 64 | 1e-4 | TBD | TBD | TBD | Long run |
-| 200 | 800 | 64 | 1e-4 | TBD | TBD | TBD | Final |
-
----
-
-## 18. Future Improvements
-
-Possible improvements:
+Possible next steps:
 
 1. Add a fixed tactical benchmark suite.
-2. Add model-vs-model arena testing outside the training loop.
-3. Log policy entropy.
-4. Log game length distribution.
-5. Log first-player win rate separately.
-6. Benchmark ONNX Runtime or TensorRT.
-7. Improve batched MCTS inference.
-8. Add a simple playable UI.
-9. Export trained models for deployment.
-10. Compare different model sizes and MCTS simulation counts.
+2. Add model-vs-model arena outside the training loop.
+3. Add policy entropy logging.
+4. Add game length histogram logging.
+5. Add first-player win-rate tracking.
+6. Improve batched MCTS GPU inference.
+7. Benchmark ONNX/TensorRT inference.
+8. Add a playable UI.
+9. Add model export scripts.
+10. Compare model sizes and simulation budgets.
 
 ---
 
-## 19. Conclusion
+## 17. Conclusion
 
-This project implements a complete AlphaZero-style Gomoku training system. It combines a deep Policy-Value network, MCTS, self-play, tactical move detection, replay buffer training, data augmentation, checkpoint recovery, and GPU acceleration.
+This project implements a complete AlphaZero-style Gomoku training system. It combines deep Policy-Value networks, MCTS, self-play, tactical move detection, prioritized replay, board augmentation, checkpoint recovery, and GPU-focused training optimizations.
 
-The current setup is designed for continuing training from a strong 15x15 `v8_legacy` checkpoint. The emphasis is on stable improvement rather than aggressive retraining.
-
-A good checkpoint should not only have lower loss, but should also demonstrate practical tactical strength: blocking threats, creating forks, recognizing double threats, and converting forced wins.
+The system is suitable for experiments on both model strength and training efficiency. A strong checkpoint should be evaluated not only by loss values, but also by practical tactical behavior such as blocking, double-threat creation, fork handling, and forced-win conversion.
