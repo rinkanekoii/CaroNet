@@ -110,12 +110,7 @@ def play_game(
     state_channels = 3 + (2 if use_coords else 0)
     state_buffer = np.empty((state_channels, board_size, board_size), dtype=np.float32)
 
-    # ── Pre-compute center bias constants (invariant across moves) ──
     use_center_bias = center_bias_strength > 0.0 and center_bias_moves > 0
-    if use_center_bias:
-        center = (board_size - 1) * 0.5
-        sigma = board_size * 0.25
-        inv_2sigma2 = -1.0 / (2.0 * sigma * sigma)
 
     while True:
         temp = _get_temperature(move_count, temp_threshold)
@@ -136,8 +131,9 @@ def play_game(
             bypassed_mcts = True
         else:
             active_mcts = mcts_p1 if player == 1 or mcts_p2 is None else mcts_p2
+            cb_strength = center_bias_strength if (use_center_bias and move_count < center_bias_moves) else 0.0
             counts = active_mcts.run_simulations(
-                board, player, num_sims=sims, add_noise=add_noise
+                board, player, num_sims=sims, add_noise=add_noise, center_bias_strength=cb_strength
             )
             if not counts:
                 winner = 0
@@ -150,15 +146,6 @@ def play_game(
             # ── Build moves_arr once, reuse below ──
             moves_arr = np.array(moves, dtype=np.int32)
 
-            # ── Center bias (constants pre-computed outside loop) ──
-            if use_center_bias and move_count < center_bias_moves:
-                dist_sq = ((moves_arr[:, 0] - center) ** 2
-                           + (moves_arr[:, 1] - center) ** 2).astype(np.float32)
-                center_weights = np.exp(dist_sq * inv_2sigma2, dtype=np.float32)
-                cw_max = center_weights.max()
-                if cw_max > 0:
-                    center_weights *= (1.0 / cw_max)
-                visits *= (1.0 + center_bias_strength * center_weights)
 
             # ── Guard against zero visits ──
             visits_sum = float(visits.sum())

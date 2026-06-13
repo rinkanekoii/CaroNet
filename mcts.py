@@ -524,8 +524,7 @@ class ProgressiveMCTS:
                 child.N += 1
             v = -v
 
-    def run_simulations(
-        self, board: np.ndarray, player: int, num_sims: int = 200, add_noise: bool = True, time_limit_ms: Optional[float] = None
+    def run_simulations(self, board: np.ndarray, player: int, num_sims: int = 200, add_noise: bool = True, center_bias_strength: float = 0.0, time_limit_ms: Optional[float] = None
     ):
         start_time = time.perf_counter()
         root = self.root
@@ -562,13 +561,25 @@ class ProgressiveMCTS:
             leaf = LeafInfo(board, player, root, [], np.empty(0, dtype=np.int32), 0, z_hash)
             self.expand_leaf_nodes_batch([leaf])
 
-        # ── Root noise injection ──
+        # ── Root noise & bias injection ──
         if (add_noise and root.child_moves is not None
                 and root.num_children > 0 and not root.noise_applied):
             nc = root.num_children
             noise = np.random.dirichlet([self.dir_alpha] * nc).astype(np.float32)
             eps = np.float32(self.noise_eps)
             root.child_P = (np.float32(1.0) - eps) * root.child_P + eps * noise
+            
+            if center_bias_strength > 0.0:
+                center = (self.board_size - 1) * 0.5
+                sigma = self.board_size * 0.25
+                inv_2sigma2 = -1.0 / (2.0 * sigma * sigma)
+                dist_sq = ((root.child_moves[:, 0] - center)**2 + (root.child_moves[:, 1] - center)**2).astype(np.float32)
+                center_weights = np.exp(dist_sq * inv_2sigma2, dtype=np.float32)
+                root.child_P *= (1.0 + center_bias_strength * center_weights)
+                sum_p = root.child_P.sum()
+                if sum_p > 0:
+                    root.child_P /= sum_p
+
             sort_idx = np.argsort(-root.child_P)
             root.child_moves = root.child_moves[sort_idx]
             root.child_P = root.child_P[sort_idx]
