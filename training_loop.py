@@ -511,6 +511,10 @@ def parallel_self_play(
     Run self-play games in parallel using ThreadPoolExecutor or ProcessPoolExecutor.
     For GPU: use threads (share GPU)
     For CPU: use processes (utilize multiple cores)
+
+    Important: the CUDA/thread path shares the already-created PyTorch model.
+    Do not clone and carry a CPU state_dict for every threaded task; it is not
+    used there and can cost hundreds of MB for the large v8_legacy model.
     """
     if num_workers is None:
         num_workers = min(4, num_games)
@@ -563,26 +567,25 @@ def parallel_self_play(
     worker_initializer = None
     worker_initargs = None
     net_state_dict = None
-    if onnx_path is None:
+
+    if onnx_path is None and use_process_pool:
         net_state_dict = _clone_state_dict(net)
-        if use_process_pool:
-            # Load once per worker process, not once per game.
-            worker_initializer = _init_selfplay_worker
-            worker_initargs = (
-                net_state_dict,
-                device_str,
-                args.size,
-                args.channels,
-                args.res_blocks,
-                args.dropout,
-                args.use_coords,
-                getattr(args, "use_checkpoint", False),
-                getattr(args, "model_class", "v8"),
-            )
-            task_state_dict = None
-        else:
-            task_state_dict = net_state_dict
+        # Load once per worker process, not once per game.
+        worker_initializer = _init_selfplay_worker
+        worker_initargs = (
+            net_state_dict,
+            device_str,
+            args.size,
+            args.channels,
+            args.res_blocks,
+            args.dropout,
+            args.use_coords,
+            getattr(args, "use_checkpoint", False),
+            getattr(args, "model_class", "v8"),
+        )
+        task_state_dict = None
     else:
+        # ONNX/threaded PyTorch path does not need a per-task state dict.
         task_state_dict = None
 
     game_args = [
@@ -742,13 +745,15 @@ def training_loop(args):
     start_iteration = 0
     if args.init_model:
         try:
+            loaded_scheduler = False
             it = load_checkpoint(
                 args.init_model, net, optimizer=optimizer, scaler=scaler, device=device,
-                strict=(args.model_class == "v8")
+                scheduler=scheduler, strict=(args.model_class == "v8")
             )
             if it is not None:
                 start_iteration = int(it)
-                # Properly advance scheduler to the correct state
+                loaded_scheduler = True
+            if it is not None and not loaded_scheduler:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     for _ in range(start_iteration):
@@ -762,7 +767,17 @@ def training_loop(args):
     total_params = sum(p.numel() for p in net.parameters())
     print(f"Network parameters: {total_params:,}")
 
-    buffer = PrioritizedReplayBuffer(capacity=args.replay_capacity)
+    replay_path = checkpoint_dir / "replay_buffer_latest.npz"
+    if getattr(args, "resume_replay_buffer", True) and args.init_model and replay_path.exists():
+        try:
+            buffer = PrioritizedReplayBuffer.load(replay_path, capacity=args.replay_capacity)
+            print(f"Loaded replay buffer: {replay_path} ({len(buffer)} samples)")
+        except Exception as exc:
+            print(f"[!] Failed to load replay buffer {replay_path}: {exc}. Starting empty.")
+            buffer = PrioritizedReplayBuffer(capacity=args.replay_capacity)
+    else:
+        buffer = PrioritizedReplayBuffer(capacity=args.replay_capacity)
+
     monitor = TrainingMonitor(window_size=10)
     log_path = checkpoint_dir / "training_log.csv"
 
@@ -929,12 +944,20 @@ def training_loop(args):
 
             # Evaluate against best model periodically
             eval_freq = getattr(args, "eval_freq", 10)
-            if (iteration + 1) % eval_freq == 0 or (iteration + 1) == getattr(args, "iters", 200):
+            eval_games = int(getattr(args, "eval_games", 0))
+
+            if eval_games <= 0:
+                print("[ARENA DISABLED] Promoting latest weights without reporting a fake win-rate.")
+                best_state_dict = _clone_state_dict(net)
+                _load_state_into_model(best_net, best_state_dict)
+                best_net.eval()
+                latest_state_dict = _clone_state_mapping(best_state_dict)
+            elif (iteration + 1) % eval_freq == 0 or (iteration + 1) == getattr(args, "iters", 200):
                 _load_state_into_model(best_net, best_state_dict)
                 best_net.eval()
                 win_rate = evaluate_models(net, best_net, device, args, iteration)
                 
-                if win_rate >= getattr(args, "eval_win_threshold", 0.55):
+                if win_rate is not None and win_rate >= getattr(args, "eval_win_threshold", 0.55):
                     print(f"[NEW BEST MODEL] Win rate {win_rate*100:.1f}% >= threshold. Promoting!")
                     best_state_dict = _clone_state_dict(net)
                     _load_state_into_model(best_net, best_state_dict)
@@ -985,9 +1008,10 @@ def training_loop(args):
             checkpoint_path = checkpoint_dir / f"model_iter{iteration+1}.pth"
             save_checkpoint(
                 checkpoint_path,
-                net,
+                model=best_net,
                 optimizer=optimizer,
                 scaler=scaler,
+                scheduler=scheduler,
                 iteration=iteration + 1,
                 **_checkpoint_metadata(args),
             )
@@ -1013,9 +1037,16 @@ def training_loop(args):
             net,
             optimizer=optimizer,
             scaler=scaler,
+            scheduler=scheduler,
             iteration=iteration + 1,
             **_checkpoint_metadata(args),
         )
+
+        if getattr(args, "save_replay_buffer", False) and len(buffer) > 0:
+            import os
+            tmp_replay_path = replay_path.with_suffix(".npz.tmp")
+            buffer.save(tmp_replay_path)
+            os.replace(tmp_replay_path, replay_path)
 
     # Print final training summary
     print(f"\n{'='*60}")
@@ -1034,6 +1065,7 @@ def training_loop(args):
         net,
         optimizer=optimizer,
         scaler=scaler,
+        scheduler=scheduler,
         iteration=args.iters,
         **_checkpoint_metadata(args),
     )

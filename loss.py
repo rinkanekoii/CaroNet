@@ -106,7 +106,13 @@ def _run_training_loop(
     
     optimizer.zero_grad(set_to_none=True)
 
+    try:
+        total_batches = len(data_iter)
+    except TypeError:
+        total_batches = None
+
     for batch in data_iter:
+        batch_index = num_batches
         states_t, pis_t, zs_t = batch
         
         if is_dataloader:
@@ -135,8 +141,14 @@ def _run_training_loop(
                 value_weight,
                 entropy_weight,
             )
-            if accumulation_steps > 1:
-                loss = loss / accumulation_steps
+            if total_batches is None:
+                grad_divisor = max(1, accumulation_steps)
+            else:
+                remaining = total_batches - batch_index
+                grad_divisor = max(1, min(accumulation_steps, remaining))
+
+        raw_loss = loss
+        loss = loss / grad_divisor
 
         if use_amp and scaler is not None:
             scaler.scale(loss).backward()
@@ -144,12 +156,12 @@ def _run_training_loop(
             loss.backward()
 
         accum_count += 1
-        total_loss += loss.detach() * (accumulation_steps if accumulation_steps > 1 else 1)
+        total_loss += raw_loss.detach()
         total_policy_loss += policy_loss.detach()
         total_value_loss += value_loss.detach()
         num_batches += 1
 
-        if accum_count >= accumulation_steps:
+        if accum_count >= accumulation_steps or (total_batches is not None and num_batches >= total_batches):
             _optimizer_step(optimizer, scaler, grad_clip, use_amp, net)
             accum_count = 0
 
@@ -226,6 +238,9 @@ class _ManualSampleIter:
             self.board_size = buffer.state_shape[-1]
         elif buffer.pis is not None:
             self.board_size = int(np.sqrt(buffer.pis.shape[1]))
+
+    def __len__(self):
+        return self.num_iters
 
     def __iter__(self):
         for _ in range(self.num_iters):

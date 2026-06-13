@@ -2,6 +2,9 @@ import math
 import time
 import collections
 import itertools
+
+MAX_INFERENCE_CACHE = 50_000
+INFERENCE_CACHE_TRIM = 10_000
 from typing import Dict, List, Tuple, Set, NamedTuple, Optional
 
 import numpy as np
@@ -485,10 +488,11 @@ class ProgressiveMCTS:
                 self._inference_cache[key] = (v, p, m)
                 cached_results.append((leaf, (v, p, m)))
             
-            # Simple FIFO-like clearing to prevent OOM
-            if len(self._inference_cache) > 200000:
-                # Remove oldest 50,000 items
-                keys_to_delete = list(itertools.islice(self._inference_cache, 50000))
+            # Keep the transposition cache bounded. 200k entries can quietly
+            # become hundreds of MB once policy/mask arrays and Python object
+            # overhead join the circus.
+            if len(self._inference_cache) > MAX_INFERENCE_CACHE:
+                keys_to_delete = list(itertools.islice(self._inference_cache, INFERENCE_CACHE_TRIM))
                 for k in keys_to_delete:
                     del self._inference_cache[k]
 

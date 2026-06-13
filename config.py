@@ -70,6 +70,8 @@ class RuntimeConfig:
     dataloader_workers: int = 2
     use_dataloader: bool = True
     seed: int = 42
+    resume_replay_buffer: bool = True
+    save_replay_buffer: bool = False
     mode: str = "train"
 
 
@@ -264,6 +266,8 @@ def add_training_args(parser):
     parser.add_argument(
         "--dataloader_workers", type=int, default=RUNTIME.dataloader_workers
     )
+    add_bool_arg(parser, "resume_replay_buffer", RUNTIME.resume_replay_buffer)
+    add_bool_arg(parser, "save_replay_buffer", RUNTIME.save_replay_buffer)
     add_bool_arg(parser, "use_dataloader", RUNTIME.use_dataloader)
 
     parser.add_argument("--seed", type=int, default=RUNTIME.seed)

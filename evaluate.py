@@ -13,7 +13,8 @@ def evaluate_models(net_new, net_old, device, args, iteration):
     """
     num_games = getattr(args, "eval_games", 20)
     if num_games <= 0:
-        return 1.0  # Auto-pass if evaluation is disabled
+        print("\n--- ARENA DISABLED: eval_games <= 0; no win-rate will be reported. ---")
+        return None
 
     print(f"\n--- ARENA: Evaluating latest model vs best model ({num_games} games) ---")
     
