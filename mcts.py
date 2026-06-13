@@ -530,11 +530,9 @@ class ProgressiveMCTS:
 
     def run_simulations(self, board: np.ndarray, player: int, num_sims: int = 200, add_noise: bool = True, center_bias_strength: float = 0.0, time_limit_ms: Optional[float] = None
     ):
-        start_time = time.perf_counter()
         root = self.root
         win_length = self.win_length
         opponent = -player
-        board_size = self.board_size
         total_cells = self._board_cells
 
         # ── Tactical short-circuits ──

@@ -14,16 +14,12 @@ import copy
 from evaluate import evaluate_models
 import math
 from pathlib import Path
-import importlib
-import platform
-import shutil
 import os
 import csv
-import json
+import warnings
 import warnings
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
-import multiprocessing as mp
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -38,8 +34,8 @@ from checkpoint_utils import (
     save_checkpoint,
     unwrap_model,
     export_to_onnx,
+    load_torch_file,
 )
-from models import ModelV8
 from replay_buffer import PrioritizedReplayBuffer
 from self_play import play_game
 
@@ -632,7 +628,6 @@ def parallel_self_play(
         completed_games = 0
         try:
             for future in as_completed(futures):
-                idx = completed_games
                 try:
                     results, winner, game_idx = future.result()
                     all_results.append((results, game_idx))
@@ -745,15 +740,22 @@ def training_loop(args):
     start_iteration = 0
     if args.init_model:
         try:
-            loaded_scheduler = False
+            checkpoint_has_scheduler = False
+            try:
+                ckpt_probe = load_torch_file(args.init_model, device="cpu")
+                checkpoint_has_scheduler = (
+                    isinstance(ckpt_probe, dict) and "scheduler_state" in ckpt_probe
+                )
+            except Exception:
+                checkpoint_has_scheduler = False
+
             it = load_checkpoint(
                 args.init_model, net, optimizer=optimizer, scaler=scaler, device=device,
                 scheduler=scheduler, strict=(args.model_class == "v8")
             )
             if it is not None:
                 start_iteration = int(it)
-                loaded_scheduler = True
-            if it is not None and not loaded_scheduler:
+            if it is not None and not checkpoint_has_scheduler:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     for _ in range(start_iteration):
@@ -818,7 +820,9 @@ def training_loop(args):
                 game_index_offset=iteration * args.games_per_iter,
             )
             for results, game_idx in all_results:
-                priority = 1.0 + (game_idx / max(1, args.games_per_iter))
+                # Until priorities are updated from model error/TD-error, keep them
+                # neutral. Game order is not a learning signal.
+                priority = 1.0
                 _push_game_to_buffer(buffer, results, priority)
         else:
             # Sequential self-play (original behavior)
@@ -844,7 +848,9 @@ def training_loop(args):
                     adjudication_threshold=getattr(args, "adjudication_threshold", 0.3),
                     resign_threshold=getattr(args, "resign_threshold", -1.1),
                 )
-                priority = 1.0 + (game_idx / max(1, args.games_per_iter))
+                # Avoid deterministic replay bias caused by self-play completion/order.
+                # Real PER should come from per-sample loss/error, not loop index.
+                priority = 1.0
                 _push_game_to_buffer(buffer, game_res.samples, priority)
                 win_stats[game_res.winner] += 1
                 game_lengths.append(game_res.num_moves)
@@ -1006,9 +1012,11 @@ def training_loop(args):
 
         if (iteration + 1) % args.save_freq == 0:
             checkpoint_path = checkpoint_dir / f"model_iter{iteration+1}.pth"
+            _load_state_into_model(net, latest_state_dict)
+            net.eval()
             save_checkpoint(
                 checkpoint_path,
-                model=best_net,
+                model=net,
                 optimizer=optimizer,
                 scaler=scaler,
                 scheduler=scheduler,
@@ -1044,9 +1052,10 @@ def training_loop(args):
 
         if getattr(args, "save_replay_buffer", False) and len(buffer) > 0:
             import os
-            tmp_replay_path = replay_path.with_suffix(".npz.tmp")
-            buffer.save(tmp_replay_path)
-            os.replace(tmp_replay_path, replay_path)
+            tmp_replay_path = replay_path.parent / f".{replay_path.name}.tmp.npz"
+            buffer.save(str(tmp_replay_path))
+            if tmp_replay_path.exists():
+                os.replace(tmp_replay_path, replay_path)
 
     # Print final training summary
     print(f"\n{'='*60}")

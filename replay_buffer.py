@@ -115,10 +115,12 @@ class PrioritizedReplayBuffer:
 
     @classmethod
     def load(cls, path: str, capacity: int) -> "PrioritizedReplayBuffer":
-        data = np.load(path)
         buf = cls(capacity=capacity)
-        buf.push_batch(data["states"], data["pis"], data["zs"], data["priorities"])
-        buf.ptr = int(data["meta"][0])
+        with np.load(path, allow_pickle=False) as data:
+            saved_ptr = int(data["meta"][0]) if "meta" in data else 0
+            buf.push_batch(data["states"], data["pis"], data["zs"], data["priorities"])
+        buf.ptr = saved_ptr % max(1, buf.capacity)
+        buf._recompute_priority_bounds()
         return buf
 
     def _init_buffers(self, state, pi):
@@ -336,7 +338,7 @@ class PrioritizedReplayBuffer:
             batch_size=batch_size,
             num_workers=num_workers,
             pin_memory=pin_memory,
-            drop_last=True,
+            drop_last=(self.size >= batch_size),
             persistent_workers=num_workers > 0,
         )
         if num_workers > 0:
@@ -351,7 +353,7 @@ class PrioritizedReplayBuffer:
             sampler = WeightedRandomSampler(
                 weights=weights,
                 num_samples=self.size,
-                replacement=True,              )
+                replacement=False,              )
             return DataLoader(dataset, sampler=sampler, **loader_kwargs)
 
         return DataLoader(dataset, shuffle=True, **loader_kwargs)

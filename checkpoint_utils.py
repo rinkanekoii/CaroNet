@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import tempfile
 from typing import Any, Mapping
 
 import torch
@@ -83,29 +84,26 @@ def load_torch_file(path, device="cpu"):
         return torch.load(path, map_location=device, weights_only=False)
 
 
-def save_checkpoint(path, model, optimizer=None, scaler=None, iteration=None, **extra):
+def save_checkpoint(
+    path,
+    model,
+    optimizer=None,
+    scaler=None,
+    scheduler=None,
+    iteration=None,
+    **extra,
+):
     """Save a portable checkpoint without DataParallel/torch.compile prefixes."""
     real_model = unwrap_model(model)
     data = {
-        "model_state": {k: v.detach().cpu() for k, v in real_model.state_dict().items()}
+        "model_state": real_model.state_dict(),
     }
-    
-    config = {
-        attr: getattr(real_model, attr)
-        for attr in ("board_size", "channels", "num_res_blocks", "use_coords")
-        if hasattr(real_model, attr)
-    }
-    extra = dict(extra)
-    extra_config = extra.pop("config", None)
-    if extra_config:
-        config.update(extra_config)
-    if config:
-        data["config"] = config
-        
     if optimizer is not None:
         data["optimizer_state"] = optimizer.state_dict()
     if scaler is not None:
         data["scaler_state"] = scaler.state_dict()
+    if scheduler is not None:
+        data["scheduler_state"] = scheduler.state_dict()
     if iteration is not None:
         data["iteration"] = iteration
     data.update(extra)
@@ -113,13 +111,28 @@ def save_checkpoint(path, model, optimizer=None, scaler=None, iteration=None, **
     import os
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(".tmp")
-    torch.save(data, tmp_path)
-    os.replace(tmp_path, path)
+    
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            torch.save(data, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def load_checkpoint(
-    path, model, optimizer=None, scaler=None, device="cpu", strict=True
+    path, model, optimizer=None, scaler=None, scheduler=None, device="cpu", strict=True
 ):
     """Load checkpoint into model and optionally optimizer/scaler."""
     checkpoint = load_torch_file(path, device=device)
@@ -148,6 +161,11 @@ def load_checkpoint(
                 scaler.load_state_dict(checkpoint["scaler_state"])
             except Exception as exc:
                 logger.warning("Failed to load scaler state: %s", exc)
+        if scheduler is not None and "scheduler_state" in checkpoint:
+            try:
+                scheduler.load_state_dict(checkpoint["scheduler_state"])
+            except Exception as exc:
+                logger.warning("Failed to load scheduler state: %s", exc)
         return checkpoint.get("iteration")
     return None
 

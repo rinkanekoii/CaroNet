@@ -44,7 +44,7 @@ def evaluate_models(net_new, net_old, device, args, iteration):
             center_bias_strength=0.0,
             center_bias_moves=0,
             adjudication_threshold=getattr(args, "adjudication_threshold", 0.3),
-            resign_threshold=getattr(args, "resign_threshold", -1.1),
+            resign_threshold=None,
         )
         
         # In sequential play_game, play_game returns GameResult
