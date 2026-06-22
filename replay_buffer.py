@@ -114,11 +114,16 @@ class PrioritizedReplayBuffer:
             )
 
     @classmethod
-    def load(cls, path: str, capacity: int) -> "PrioritizedReplayBuffer":
+    def load(cls, path: str, capacity: int, expected_channels: int = None) -> "PrioritizedReplayBuffer":
         buf = cls(capacity=capacity)
         with np.load(path, allow_pickle=False) as data:
             saved_ptr = int(data["meta"][0]) if "meta" in data else 0
-            buf.push_batch(data["states"], data["pis"], data["zs"], data["priorities"])
+            states = data["states"]
+            if expected_channels is not None and states.shape[1] < expected_channels:
+                pad_width = expected_channels - states.shape[1]
+                # Pad axis 1 (channels) with zeros
+                states = np.pad(states, ((0,0), (0,pad_width), (0,0), (0,0)), mode='constant', constant_values=0)
+            buf.push_batch(states, data["pis"], data["zs"], data["priorities"])
         buf.ptr = saved_ptr % max(1, buf.capacity)
         buf._recompute_priority_bounds()
         return buf

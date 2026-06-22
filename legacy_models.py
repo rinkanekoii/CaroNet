@@ -22,7 +22,7 @@ class ImprovedPVNet(nn.Module):
         super().__init__()
         self.board_size = board_size
         self.use_coords = use_coords
-        in_planes = 3 + (2 if use_coords else 0)
+        in_planes = 4 + (2 if use_coords else 0)
         groups = _compute_groups(channels, target=32)
 
         self.conv_input = nn.Sequential(
@@ -56,7 +56,7 @@ class ImprovedPVNet(nn.Module):
         _kaiming_init(self)
 
     def forward(self, x):
-        expected_ch = 3 + (2 if self.use_coords else 0)
+        expected_ch = 4 + (2 if self.use_coords else 0)
         assert x.shape[1] == expected_ch, (
             f"Expected {expected_ch} input channels (use_coords={self.use_coords}), got {x.shape[1]}. "
             f"If use_coords=True, append normalized (row, col) coordinate maps after [player, opponent, empty]."
@@ -94,7 +94,7 @@ class ModelV5(nn.Module):
         self.board_size = board_size
         self.use_coords = use_coords
         self.use_checkpoint = use_checkpoint
-        in_planes = 3 + (2 if use_coords else 0)
+        in_planes = 4 + (2 if use_coords else 0)
         groups = _compute_groups(channels, target=32)
 
         self.conv_input = nn.Sequential(
@@ -170,7 +170,7 @@ class ModelV6(nn.Module):
         self.board_size = board_size
         self.use_coords = use_coords
         self.use_checkpoint = use_checkpoint
-        in_planes = 3 + (2 if use_coords else 0)
+        in_planes = 4 + (2 if use_coords else 0)
         groups = _compute_groups(channels, target=32)
 
         self.conv_input = nn.Sequential(
@@ -252,7 +252,7 @@ class ModelV7(nn.Module):
         self.board_size = board_size
         self.use_coords = use_coords
         self.use_checkpoint = use_checkpoint
-        in_planes = 3 + (2 if use_coords else 0)
+        in_planes = 4 + (2 if use_coords else 0)
 
         groups = max(1, min(32, channels // 8))
         while channels % groups != 0:
@@ -403,7 +403,7 @@ class GlobalContextBlock_Legacy(nn.Module):
         ctx = torch.softmax(ctx, dim=-1)
         x_flat = x.flatten(2)
         global_ctx = torch.bmm(x_flat, ctx.transpose(1, 2))
-        global_ctx = global_ctx.view(b, c, 1, 1)
+        global_ctx = global_ctx.view(-1, c, 1, 1)
         attn = self.transform(global_ctx)
         return x * attn
 
@@ -430,7 +430,7 @@ class TransformerBlock_Legacy(nn.Module):
         out = self.norm2(x_flat)
         mlp_out = self.mlp(out)
         x_flat = x_flat + mlp_out
-        return x_flat.transpose(1, 2).view(b, c, h, w)
+        return x_flat.transpose(1, 2).view(-1, c, h, w)
 
 class ModelV8_Legacy(nn.Module):
     def __init__(self, channels=256, board_size=15, num_res_blocks=20, dropout=0.1, use_coords=True, use_checkpoint=False):
@@ -439,7 +439,7 @@ class ModelV8_Legacy(nn.Module):
         self.use_coords = use_coords
         self.use_checkpoint = use_checkpoint
         
-        in_planes = 3 + (2 if use_coords else 0)
+        in_planes = 4 + (2 if use_coords else 0)
         self.stem = MultiScaleStem_Legacy(in_planes, channels)
         
         blocks = []

@@ -21,13 +21,13 @@ def _coord_planes(board_size: int):
 
 
 def _with_canonical_coords(
-    state_3: np.ndarray, board_size: int, original_channels: int
+    state_no_coords: np.ndarray, board_size: int, has_coords: bool
 ):
     """Append fresh absolute coordinate planes after rotating/flipping occupancy planes."""
-    if original_channels <= 3:
-        return state_3.astype(np.float32, copy=False)
+    if not has_coords:
+        return state_no_coords.astype(np.float32, copy=False)
     rows, cols = _coord_planes(board_size)
-    return np.concatenate([state_3, rows[None, :, :], cols[None, :, :]], axis=0).astype(
+    return np.concatenate([state_no_coords, rows[None, :, :], cols[None, :, :]], axis=0).astype(
         np.float32, copy=False
     )
 
@@ -41,7 +41,9 @@ def augment_sample(state: np.ndarray, policy: np.ndarray, board_size: int):
     """
     policy_2d = policy.reshape(board_size, board_size)
     original_channels = state.shape[0]
-    board_planes = state[:3]
+    has_coords = original_channels >= 5
+    num_board_planes = original_channels - 2 if has_coords else original_channels
+    board_planes = state[:num_board_planes]
     augmented = []
     for rotation in range(4):
         rotated_board = np.rot90(board_planes, rotation, axes=(1, 2)).copy()
@@ -49,7 +51,7 @@ def augment_sample(state: np.ndarray, policy: np.ndarray, board_size: int):
         rotated_policy = rotated_policy_2d.copy().reshape(-1)
         augmented.append(
             (
-                _with_canonical_coords(rotated_board, board_size, original_channels),
+                _with_canonical_coords(rotated_board, board_size, has_coords),
                 rotated_policy,
             )
         )
@@ -58,7 +60,7 @@ def augment_sample(state: np.ndarray, policy: np.ndarray, board_size: int):
         flipped_policy = np.ascontiguousarray(np.flip(rotated_policy_2d, axis=1)).reshape(-1)
         augmented.append(
             (
-                _with_canonical_coords(flipped_board, board_size, original_channels),
+                _with_canonical_coords(flipped_board, board_size, has_coords),
                 flipped_policy,
             )
         )
@@ -73,7 +75,9 @@ def random_augment_single(state: np.ndarray, policy: np.ndarray, board_size: int
     """
     policy_2d = policy.reshape(board_size, board_size)
     original_channels = state.shape[0]
-    board_planes = state[:3]
+    has_coords = original_channels >= 5
+    num_board_planes = original_channels - 2 if has_coords else original_channels
+    board_planes = state[:num_board_planes]
     
     transform_id = np.random.randint(8)
     rotation = transform_id >> 1  # 0-3
@@ -86,7 +90,7 @@ def random_augment_single(state: np.ndarray, policy: np.ndarray, board_size: int
         rotated_board = np.flip(rotated_board, axis=2)
         rotated_policy = np.flip(rotated_policy, axis=1)
     
-    aug_state = _with_canonical_coords(np.ascontiguousarray(rotated_board), board_size, original_channels)
+    aug_state = _with_canonical_coords(np.ascontiguousarray(rotated_board), board_size, has_coords)
     aug_policy = np.ascontiguousarray(rotated_policy).reshape(-1)
     return aug_state, aug_policy
 

@@ -45,6 +45,8 @@ def run_selfplay_once(args):
         center_bias_moves=args.center_bias_moves,
         adjudication_threshold=getattr(args, "adjudication_threshold", 0.3),
         resign_threshold=getattr(args, "resign_threshold", -1.1),
+        rule_type=getattr(args, "rule_type", 0),
+        mixed_rules=getattr(args, "mixed_rules", False),
     )
     print(f"Game finished. Winner: {game_res.winner}, Moves: {game_res.num_moves}")
 

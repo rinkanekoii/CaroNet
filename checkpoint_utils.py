@@ -139,6 +139,19 @@ def load_checkpoint(
     model_state = normalize_legacy_state_keys(
         strip_state_prefixes(extract_model_state(checkpoint))
     )
+    # NETWORK SURGERY: Expand input channels from 5 to 6 if needed
+    net_state_dict = dict(unwrap_model(model).named_parameters())
+    for key in ("stem.branch3.0.weight", "conv_input.0.weight", "stem.branch5.0.weight", "stem.branch7.0.weight"):
+        if key in model_state and key in net_state_dict:
+            state_w = model_state[key]
+            mod_w = net_state_dict[key]
+            if state_w.shape[1] == 5 and mod_w.shape[1] == 6:
+                import logging
+                logging.getLogger(__name__).info(f"Network Surgery on {key}: expanding input channels from 5 to 6")
+                new_w = torch.zeros_like(mod_w)
+                new_w[:, :5, :, :] = state_w
+                model_state[key] = new_w
+
     incompatible = unwrap_model(model).load_state_dict(model_state, strict=strict)
     if not strict and (getattr(incompatible, "missing_keys", None) or getattr(incompatible, "unexpected_keys", None)):
         import logging
@@ -154,6 +167,23 @@ def load_checkpoint(
         if optimizer is not None and "optimizer_state" in checkpoint:
             try:
                 optimizer.load_state_dict(checkpoint["optimizer_state"])
+                # OPTIMIZER NETWORK SURGERY
+                for name, param in unwrap_model(model).named_parameters():
+                    if name in ("stem.branch3.0.weight", "conv_input.0.weight", "stem.branch5.0.weight", "stem.branch7.0.weight"):
+                        if param in optimizer.state:
+                            state = optimizer.state[param]
+                            if "exp_avg" in state and state["exp_avg"].shape != param.shape:
+                                if state["exp_avg"].shape[1] == 5 and param.shape[1] == 6:
+                                    for state_key in ("exp_avg", "exp_avg_sq"):
+                                        if state_key in state:
+                                            old_t = state[state_key]
+                                            new_t = torch.zeros_like(param, memory_format=torch.contiguous_format)
+                                            new_t[:, :5, :, :] = old_t
+                                            state[state_key] = new_t
+                                    logger.info(f"Network Surgery on optimizer state for {name}: expanding from 5 to 6 channels")
+                                else:
+                                    del optimizer.state[param]
+                                    logger.warning(f"Cleared optimizer state for {name} due to unhandled shape mismatch.")
             except Exception as exc:
                 logger.warning("Failed to load optimizer state: %s", exc)
         if scaler is not None and "scaler_state" in checkpoint:
@@ -178,10 +208,10 @@ def infer_use_coords_from_state_dict(state_dict, default=True):
             in_channels = int(state_dict[key].shape[1])
             if in_channels == 3:
                 return False
-            if in_channels == 5:
+            if in_channels in (5, 6):
                 return True
             import logging
-            logging.getLogger(__name__).warning(f"Unexpected number of input channels: {in_channels}. Expected 3 or 5.")
+            logging.getLogger(__name__).warning(f"Unexpected number of input channels: {in_channels}. Expected 3, 5, or 6.")
     return default
 
 
@@ -295,6 +325,22 @@ def load_model_from_checkpoint(
         use_coords=use_coords,
         use_checkpoint=use_checkpoint,
     ).to(device)
+
+    # NETWORK SURGERY: Expand input channels from 5 to 6 if needed
+    for key in ("stem.branch3.0.weight", "conv_input.0.weight", "stem.branch5.0.weight", "stem.branch7.0.weight"):
+        if key in model_state:
+            state_w = model_state[key]
+            try:
+                mod_w = dict(net.named_parameters())[key]
+                if state_w.shape[1] == 5 and mod_w.shape[1] == 6:
+                    import logging
+                    logging.getLogger(__name__).info(f"Network Surgery on {key}: expanding input channels from 5 to 6")
+                    new_w = torch.zeros_like(mod_w)
+                    new_w[:, :5, :, :] = state_w
+                    model_state[key] = new_w
+            except KeyError:
+                pass
+
     net.load_state_dict(model_state, strict=strict)
     net.eval()
     return net
@@ -315,7 +361,7 @@ def export_to_onnx(model, path, board_size=15, use_coords=True):
     real_model.eval()
     device = next(real_model.parameters()).device
 
-    in_channels = 3 + (2 if use_coords else 0)
+    in_channels = 4 + (2 if use_coords else 0)
     dummy_input = torch.zeros(1, in_channels, board_size, board_size, device=device)
 
     print(f"Exporting model to ONNX: {path}")  # Suppress verbose torch.onnx warnings

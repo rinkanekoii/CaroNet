@@ -52,7 +52,12 @@ def play_game(
     pw_min: int = 5,
     adjudication_threshold: float = 0.3,
     resign_threshold: Optional[float] = -1.1,
+    rule_type: int = 0,
+    mixed_rules: bool = False,
 ) -> GameResult:
+    if mixed_rules:
+        rule_type = int(np.random.choice([0, 1]))
+
     board = np.zeros((board_size, board_size), dtype=np.int8)
     history = []
     if start_player is None or start_player == 0:
@@ -78,6 +83,7 @@ def play_game(
         dirichlet_alpha=dirichlet_alpha,
         pw_alpha=pw_alpha,
         pw_min=pw_min,
+        rule_type=rule_type,
     )
     mcts_p1.reset_root()
 
@@ -96,6 +102,7 @@ def play_game(
             dirichlet_alpha=dirichlet_alpha,
             pw_alpha=pw_alpha,
             pw_min=pw_min,
+            rule_type=rule_type,
         )
         mcts_p2.reset_root()
 
@@ -107,7 +114,7 @@ def play_game(
     max_moves = min(max_moves, board_cells)  # never exceed board capacity
 
     pi_buffer = np.zeros(board_cells, dtype=np.float32)
-    state_channels = 3 + (2 if use_coords else 0)
+    state_channels = 4 + (2 if use_coords else 0)
     state_buffer = np.empty((state_channels, board_size, board_size), dtype=np.float32)
 
     use_center_bias = center_bias_strength > 0.0 and center_bias_moves > 0
@@ -117,7 +124,7 @@ def play_game(
         add_noise = move_count < first_noise_moves
 
         # ── Fast Win/Block Check (Bypass MCTS) ──
-        winning_moves, blocking_moves = find_tactical_moves(board, player, win_length)
+        winning_moves, blocking_moves = find_tactical_moves(board, player, win_length, rule_type)
         pi_buffer[:] = 0.0
 
         bypassed_mcts = False
@@ -178,7 +185,7 @@ def play_game(
                 pi_buffer[indices] = 1.0 / num_moves
 
         # ── Record state (reuse state_buffer to avoid allocation) ──
-        state_to_tensor_out(board, player, state_buffer, use_coords=use_coords)
+        state_to_tensor_out(board, player, state_buffer, use_coords=use_coords, rule_type=rule_type)
         history.append((state_buffer.copy(), pi_buffer.copy(), player))
 
         r, c = selected_move
@@ -196,7 +203,7 @@ def play_game(
         if mcts_p2 is not None:
             mcts_p2.move_root(selected_move)
 
-        if check_win_adaptive(board, r, c, player, win_length):
+        if check_win_adaptive(board, r, c, player, win_length, rule_type):
             winner = player
             break
         if move_count >= board_cells:
@@ -208,7 +215,7 @@ def play_game(
         # ── Resign mechanism ──
         if resign_threshold is not None:
             # Evaluate from the perspective of the player who is about to move.
-            state_to_tensor_out(board, next_player, state_buffer, use_coords=use_coords)
+            state_to_tensor_out(board, next_player, state_buffer, use_coords=use_coords, rule_type=rule_type)
             inp = torch.from_numpy(state_buffer).unsqueeze(0).to(device)
             active_net = net if (next_player == 1 or net2 is None) else net2
             with torch.inference_mode():
@@ -223,7 +230,7 @@ def play_game(
         # ── Max moves cap: use value network to adjudicate ──
         if move_count >= max_moves:
             # Evaluate from the perspective of the player who is about to move.
-            state_to_tensor_out(board, next_player, state_buffer, use_coords=use_coords)
+            state_to_tensor_out(board, next_player, state_buffer, use_coords=use_coords, rule_type=rule_type)
             inp = torch.from_numpy(state_buffer).unsqueeze(0).to(device)
             active_net = net if (next_player == 1 or net2 is None) else net2
             with torch.inference_mode():

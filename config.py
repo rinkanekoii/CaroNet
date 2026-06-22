@@ -142,6 +142,12 @@ def add_training_args(parser):
         help="Alternate the starting player across self-play games",
     )
     parser.add_argument(
+        "--rule_type",
+        type=int,
+        default=0,  # Default to Gomoku (rule_type=0) as it's the standard rule
+        help="0: Gomoku, 1: Caro (block at both ends doesn't win)",
+    )
+    parser.add_argument(
         "--center_bias_strength",
         type=float,
         default=MCTS.center_bias_strength,
@@ -224,6 +230,12 @@ def add_training_args(parser):
         help="Resume from checkpoint",
     )
     parser.add_argument(
+        "--replay_buffer_path",
+        type=str,
+        default=None,
+        help="Path to a specific replay buffer to resume from",
+    )
+    parser.add_argument(
         "--model_class",
         type=str,
         default="v8",
@@ -269,6 +281,7 @@ def add_training_args(parser):
     add_bool_arg(parser, "resume_replay_buffer", RUNTIME.resume_replay_buffer)
     add_bool_arg(parser, "save_replay_buffer", RUNTIME.save_replay_buffer)
     add_bool_arg(parser, "use_dataloader", RUNTIME.use_dataloader)
+    add_bool_arg(parser, "mixed_rules", False, "Mix standard and Caro rules in self-play")
 
     parser.add_argument("--seed", type=int, default=RUNTIME.seed)
     parser.add_argument("--mode", choices=["train", "selfplay"], default=RUNTIME.mode)

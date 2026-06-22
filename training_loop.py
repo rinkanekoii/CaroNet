@@ -399,6 +399,8 @@ class SelfPlayTask:
     adjudication_threshold: float
     resign_threshold: float
     use_compile: bool
+    rule_type: int
+    mixed_rules: bool
 
 def _play_single_game(task: SelfPlayTask):
     """Worker function for parallel self-play."""
@@ -432,6 +434,7 @@ def _play_single_game(task: SelfPlayTask):
     adjudication_threshold = task.adjudication_threshold
     resign_threshold = task.resign_threshold
     use_compile = task.use_compile
+    mixed_rules = task.mixed_rules
 
     # Set different seed per game per iteration
     _seed_selfplay_game(seed, iteration, game_idx)
@@ -486,10 +489,11 @@ def _play_single_game(task: SelfPlayTask):
         use_coords=use_coords,
         first_noise_moves=first_noise_moves,
         start_player=start_player,
-        center_bias_strength=center_bias_strength,
         center_bias_moves=center_bias_moves,
         adjudication_threshold=adjudication_threshold,
         resign_threshold=resign_threshold,
+        rule_type=task.rule_type,
+        mixed_rules=mixed_rules,
     )
     return game_res.samples, game_res.winner, game_idx
 
@@ -584,11 +588,21 @@ def parallel_self_play(
         # ONNX/threaded PyTorch path does not need a per-task state dict.
         task_state_dict = None
 
+    num_gpus = torch.cuda.device_count() if device.type == "cuda" else 0
+    if num_gpus > 1 and onnx_path is None and not use_process_pool:
+        shared_pytorch_nets = []
+        for d in range(num_gpus):
+            net_d = copy.deepcopy(net).to(f"cuda:{d}")
+            net_d.eval()
+            shared_pytorch_nets.append(net_d)
+    else:
+        shared_pytorch_nets = [net] if (onnx_path is None and not use_process_pool) else None
+
     game_args = [
         SelfPlayTask(
             game_idx=i,
             net_state_dict=task_state_dict,
-            device_str=device_str,
+            device_str=f"cuda:{i % num_gpus}" if num_gpus > 1 else device_str,
             board_size=args.size,
             sims=args.sims,
             c_puct=args.c_puct,
@@ -609,11 +623,13 @@ def parallel_self_play(
             onnx_path=onnx_path,
             model_class=getattr(args, "model_class", "v8"),
             shared_onnx_net=shared_onnx_net,
-            shared_pytorch_net=net if (onnx_path is None and not use_process_pool) else None,
+            shared_pytorch_net=shared_pytorch_nets[i % num_gpus] if shared_pytorch_nets else None,
             iteration=iteration,
             adjudication_threshold=getattr(args, "adjudication_threshold", 0.3),
             resign_threshold=getattr(args, "resign_threshold", -1.1),
             use_compile=getattr(args, "use_compile", False),
+            rule_type=getattr(args, "rule_type", 0),
+            mixed_rules=getattr(args, "mixed_rules", False),
         )
         for i in range(num_games)
     ]
@@ -769,15 +785,28 @@ def training_loop(args):
     total_params = sum(p.numel() for p in net.parameters())
     print(f"Network parameters: {total_params:,}")
 
-    replay_path = checkpoint_dir / "replay_buffer_latest.npz"
-    if getattr(args, "resume_replay_buffer", True) and args.init_model and replay_path.exists():
+    if getattr(args, "replay_buffer_path", None):
+        replay_path = Path(args.replay_buffer_path)
+    else:
+        replay_path = checkpoint_dir / "replay_buffer_latest.npz"
+        
+    should_load = False
+    if getattr(args, "replay_buffer_path", None):
+        should_load = True
+    elif getattr(args, "resume_replay_buffer", True) and args.init_model:
+        should_load = True
+
+    if should_load and replay_path.exists():
         try:
-            buffer = PrioritizedReplayBuffer.load(replay_path, capacity=args.replay_capacity)
+            expected_ch = 4 + (2 if getattr(args, "use_coords", True) else 0)
+            buffer = PrioritizedReplayBuffer.load(replay_path, capacity=args.replay_capacity, expected_channels=expected_ch)
             print(f"Loaded replay buffer: {replay_path} ({len(buffer)} samples)")
         except Exception as exc:
             print(f"[!] Failed to load replay buffer {replay_path}: {exc}. Starting empty.")
             buffer = PrioritizedReplayBuffer(capacity=args.replay_capacity)
     else:
+        if getattr(args, "replay_buffer_path", None) and not replay_path.exists():
+            print(f"[!] Warning: Specified replay buffer path not found: {replay_path}. Starting empty.")
         buffer = PrioritizedReplayBuffer(capacity=args.replay_capacity)
 
     monitor = TrainingMonitor(window_size=10)
@@ -847,6 +876,7 @@ def training_loop(args):
                     center_bias_moves=getattr(args, "center_bias_moves", 0),
                     adjudication_threshold=getattr(args, "adjudication_threshold", 0.3),
                     resign_threshold=getattr(args, "resign_threshold", -1.1),
+                    mixed_rules=getattr(args, "mixed_rules", False),
                 )
                 # Avoid deterministic replay bias caused by self-play completion/order.
                 # Real PER should come from per-sample loss/error, not loop index.
@@ -900,8 +930,9 @@ def training_loop(args):
 
             # Use DataLoader-based training for better GPU utilization
             if use_dataloader and device.type == "cuda":
+                train_net = torch.nn.DataParallel(net) if torch.cuda.device_count() > 1 else net
                 avg_loss, avg_policy, avg_value = train_network_dataloader(
-                    net,
+                    train_net,
                     buffer,
                     device,
                     optimizer,
@@ -1052,10 +1083,11 @@ def training_loop(args):
 
         if getattr(args, "save_replay_buffer", False) and len(buffer) > 0:
             import os
-            tmp_replay_path = replay_path.parent / f".{replay_path.name}.tmp.npz"
+            save_path = checkpoint_dir / "replay_buffer_latest.npz"
+            tmp_replay_path = save_path.parent / f".{save_path.name}.tmp.npz"
             buffer.save(str(tmp_replay_path))
             if tmp_replay_path.exists():
-                os.replace(tmp_replay_path, replay_path)
+                os.replace(tmp_replay_path, save_path)
 
     # Print final training summary
     print(f"\n{'='*60}")

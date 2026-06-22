@@ -317,7 +317,7 @@ class ModelV8(nn.Module):
         self.num_res_blocks = num_res_blocks
         self.use_coords = use_coords
         self.use_checkpoint = use_checkpoint
-        in_planes = 3 + (2 if use_coords else 0)
+        in_planes = 4 + (2 if use_coords else 0)
 
         groups = max(1, min(32, channels // 8))
         while channels % groups != 0:
@@ -420,7 +420,7 @@ class ModelV8(nn.Module):
                     nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
-        expected_ch = 3 + (2 if self.use_coords else 0)
+        expected_ch = 4 + (2 if self.use_coords else 0)
         assert x.shape[1] == expected_ch, (
             f"Expected {expected_ch} input channels (use_coords={self.use_coords}), got {x.shape[1]}. "
             f"If use_coords=True, append normalized (row, col) coordinate maps after [player, opponent, empty]."

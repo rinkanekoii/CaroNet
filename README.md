@@ -24,6 +24,28 @@ The project focuses on practical Caro/Gomoku training with tactical move detecti
 
 ---
 
+## Game Rules Configuration
+
+CaroNet supports two different rule sets during training. By default, it trains on **Gomoku rules**.
+
+```bash
+--rule_type 0       # Default: Gomoku rules (5-in-a-row is a win regardless of blocks)
+--rule_type 1       # Caro rules (5-in-a-row blocked at both ends is NOT a win)
+```
+
+If you want the AI to learn both rule sets simultaneously, you can enable mixed rules:
+
+```bash
+--mixed_rules       # Default: False. If True, randomly switches between Gomoku and Caro each game.
+```
+
+When training with `--rule_type 1` (Caro), the AI will:
+- Correctly evaluate board edges/walls as blocks.
+- Learn to avoid wasting moves on blocked lines.
+- Explore distant blocks and strategic traps thanks to its expanded 13x13 (Radius 6) tactical vision.
+
+---
+
 ## Training Pipeline
 
 CaroNet trains without human game records.  
@@ -483,6 +505,8 @@ python training.py --mode selfplay --init_model "checkpoints/model_latest.pth" -
 | Parameter | Description |
 |---|---|
 | `--mode` | `train` or `selfplay` |
+| `--rule_type` | `1` for Caro (block at both ends doesn't win), `0` for Gomoku |
+| `--mixed_rules` | Randomly swap between Gomoku and Caro per game |
 | `--init_model` | Checkpoint path |
 | `--model_class` | Model architecture |
 | `--size` | Board size |

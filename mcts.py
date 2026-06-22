@@ -51,12 +51,16 @@ _LEGAL_MASK_CHANNEL = 2  # state_to_tensor_out layout: [player, opponent, empty,
 
 @njit(cache=True, nogil=True)
 def _has_any_neighbor(board, r: int, c: int) -> bool:
-    """Check if cell (r,c) is adjacent to ANY piece (player or opponent)."""
+    """Check if cell (r,c) is within radius 6 of ANY piece (player or opponent).
+    
+    Expanded to radius 6 so tactical analysis can find
+    long-range blocking and attack moves.
+    """
     N = board.shape[0]
-    r_lo = max(0, r - 1)
-    r_hi = min(N, r + 2)
-    c_lo = max(0, c - 1)
-    c_hi = min(N, c + 2)
+    r_lo = max(0, r - 6)
+    r_hi = min(N, r + 7)
+    c_lo = max(0, c - 6)
+    c_hi = min(N, c + 7)
     for nr in range(r_lo, r_hi):
         for nc in range(c_lo, c_hi):
             if nr == r and nc == c:
@@ -66,7 +70,7 @@ def _has_any_neighbor(board, r: int, c: int) -> bool:
     return False
 
 @njit(cache=True, nogil=True)
-def _find_tactical_masks(board, player: int, win_length: int):
+def _find_tactical_masks(board, player: int, win_length: int, rule_type: int):
     N = board.shape[0]
     opponent = -player
     winning = np.zeros((N, N), dtype=np.uint8)
@@ -80,12 +84,12 @@ def _find_tactical_masks(board, player: int, win_length: int):
                 continue
 
             board[r, c] = player
-            if check_win_adaptive(board, r, c, player, win_length):
+            if check_win_adaptive(board, r, c, player, win_length, rule_type):
                 winning[r, c] = 1
             board[r, c] = 0
 
             board[r, c] = opponent
-            if check_win_adaptive(board, r, c, opponent, win_length):
+            if check_win_adaptive(board, r, c, opponent, win_length, rule_type):
                 blocking[r, c] = 1
             board[r, c] = 0
 
@@ -229,8 +233,8 @@ class ONNXNetWrapper:
             return torch.from_numpy(v_preds).to(device), torch.from_numpy(p_logits).to(device)
         return v_preds, p_logits
 
-def find_tactical_moves(board: np.ndarray, player: int, win_length: int = 5) -> Tuple[Set[Tuple[int, int]], Set[Tuple[int, int]]]:
-    win_mask, block_mask = _find_tactical_masks(board, int(player), int(win_length))
+def find_tactical_moves(board: np.ndarray, player: int, win_length: int = 5, rule_type: int = 0) -> Tuple[Set[Tuple[int, int]], Set[Tuple[int, int]]]:
+    win_mask, block_mask = _find_tactical_masks(board, int(player), int(win_length), int(rule_type))
     winning_moves = set()
     blocking_moves = set()
     wr = np.argwhere(win_mask != 0)
@@ -294,7 +298,7 @@ class ProgressiveMCTS:
     __slots__ = (
         "net", "board_size", "device", "c_puct", "noise_eps",
         "batch_size", "win_length", "progressive_widening", "pw_alpha", "pw_min",
-        "dir_alpha", "root", "use_coords",
+        "dir_alpha", "root", "use_coords", "rule_type",
         "_state_channels", "_states_buffer", "_scratch_board",
         "_is_onnx", "_autocast_fn", "_device_type",
         "_board_cells", "_inference_cache"
@@ -304,7 +308,8 @@ class ProgressiveMCTS:
                  c_puct: float = 2.5, dirichlet_alpha=None,
                  noise_eps: float = 0.35, batch_size: int = 64,
                  win_length: int = 5, progressive_widening: bool = True,
-                 use_coords: bool = False, pw_alpha: float = 3.0, pw_min: int = 5):
+                 use_coords: bool = False, pw_alpha: float = 3.0, pw_min: int = 5,
+                 rule_type: int = 0):
         self.net = net
         if board_size > ZOBRIST_TABLE.shape[1]:
             raise ValueError(
@@ -322,7 +327,8 @@ class ProgressiveMCTS:
         self.dir_alpha = 15.0 / board_size if dirichlet_alpha is None else dirichlet_alpha
         self.root = MCTSNode()
         self.use_coords = use_coords
-        self._state_channels = 3 + (2 if use_coords else 0)
+        self.rule_type = rule_type
+        self._state_channels = 4 + (2 if use_coords else 0)
         self._states_buffer = np.empty(
             (self.batch_size, self._state_channels, self.board_size, self.board_size),
             dtype=np.float32,
@@ -426,7 +432,7 @@ class ProgressiveMCTS:
 
             for i in range(bs):
                 leaf = boards_to_infer[i][0]
-                state_to_tensor_out(leaf.board, leaf.player, states[i], use_coords=use_coords)
+                state_to_tensor_out(leaf.board, leaf.player, states[i], use_coords=use_coords, rule_type=self.rule_type)
 
             # ── Neural network inference ──
             if self._is_onnx:
@@ -536,7 +542,7 @@ class ProgressiveMCTS:
         total_cells = self._board_cells
 
         # ── Tactical short-circuits ──
-        winning_moves, blocking_moves = find_tactical_moves(board, player, win_length)
+        winning_moves, blocking_moves = find_tactical_moves(board, player, win_length, self.rule_type)
         if winning_moves:
             return {next(iter(winning_moves)): num_sims}
 
